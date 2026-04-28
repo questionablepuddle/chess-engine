@@ -60,6 +60,15 @@ function tryMove(chess: Chess, san: string) {
   }
 }
 
+// Returns all legal moves from the position after replaying sanMoves, as UCI strings.
+export function getLegalUciMoves(sanMoves: string[]): string[] {
+  const chess = new Chess();
+  for (const san of sanMoves) {
+    try { chess.move(san); } catch { break; }
+  }
+  return chess.moves({ verbose: true }).map(m => m.from + m.to + (m.promotion ?? ''));
+}
+
 // ---------------------------------------------------------------------------
 // Timing helpers
 // ---------------------------------------------------------------------------

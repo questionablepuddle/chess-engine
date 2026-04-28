@@ -2,7 +2,7 @@ import 'dotenv/config';
 import * as path from 'path';
 import { UCIEngine } from './engine';
 import { ChessDotCom } from './browser';
-import { sanMovesToUci, sleep, humanDelay, log } from './utils';
+import { sanMovesToUci, getLegalUciMoves, sleep, humanDelay, log } from './utils';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -68,7 +68,6 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     log('Main', `Move count: ${sanMoves.length}  UCI list: ${uciMoves.join(' ') || '(none)'}`);
 
     if (uciMoves.length !== sanMoves.length) {
-      // SAN→UCI conversion failed mid-way; take a debug screenshot
       await browser.page.screenshot({ path: '/tmp/debug-conv-error.png' });
       log('Main', 'ERROR: SAN→UCI conversion incomplete — screenshot at /tmp/debug-conv-error.png');
       break;
@@ -87,19 +86,41 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     }
 
     // -----------------------------------------------------------------------
+    // Pre-click legality check
+    // -----------------------------------------------------------------------
+    const legalMoves = getLegalUciMoves(sanMoves);
+    if (!legalMoves.includes(bestMove)) {
+      log('Main', `WARNING: engine move ${bestMove} not in legal move list`);
+      log('Main', `Legal moves: ${legalMoves.slice(0, 15).join(' ')}`);
+    }
+
+    // -----------------------------------------------------------------------
     // Human-like delay before playing
     // -----------------------------------------------------------------------
     await humanDelay();
 
     // -----------------------------------------------------------------------
-    // Execute move on the board
+    // Execute move — if it doesn't register, re-ask the engine once
     // -----------------------------------------------------------------------
+    let registered = false;
     try {
-      await browser.executeMove(bestMove, sanMoves.length);
+      registered = await browser.executeMove(bestMove, sanMoves.length);
     } catch (err) {
-      log('Main', `Move execution failed: ${err}`);
-      await browser.page.screenshot({ path: '/tmp/debug-move-fail.png' });
-      // Don't crash — try to read game state and continue
+      log('Main', `Move execution threw: ${err}`);
+    }
+
+    if (!registered) {
+      log('Main', `${bestMove} failed to register — re-asking engine for new move`);
+      try {
+        const freshMoves = await browser.readMoves();
+        const freshUci = sanMovesToUci(freshMoves);
+        bestMove = await engine.bestMove(freshUci, MOVE_TIME_MS);
+        log('Main', `Retrying with engine move: ${bestMove}`);
+        await humanDelay();
+        await browser.executeMove(bestMove, freshMoves.length);
+      } catch (err) {
+        log('Main', `Retry also failed: ${err} — continuing to next poll`);
+      }
     }
 
     // -----------------------------------------------------------------------

@@ -344,7 +344,8 @@ export class ChessDotCom {
   }
 
   // Execute a UCI move (e.g. "e2e4", "e7e8q") on the board.
-  async executeMove(uciMove: string, prevMoveCount: number): Promise<void> {
+  // Returns true if the move registered (move count increased), false otherwise.
+  async executeMove(uciMove: string, prevMoveCount: number): Promise<boolean> {
     const from = uciMove.slice(0, 2);
     const to = uciMove.slice(2, 4);
     const promo = uciMove.length === 5 ? uciMove[4] : undefined;
@@ -355,18 +356,22 @@ export class ChessDotCom {
     await sleep(80 + randomBetween(40, 120));
     await this.clickSquare(to);
 
-    // Handle promotion dialog
     if (promo) {
       await this.handlePromotion(promo);
     }
 
-    // Wait up to 3s for the move to register (DOM move count increases)
+    // Wait up to 3s for the move to register
     const deadline = Date.now() + 3_000;
     while (Date.now() < deadline) {
       const current = (await this.readMoves()).length;
-      if (current > prevMoveCount) break;
+      if (current > prevMoveCount) return true;
       await sleep(100);
     }
+
+    // Move did not register
+    await this.page.screenshot({ path: '/tmp/debug-move-failed.png' });
+    log('Browser', `Move ${uciMove} did not register — screenshot at /tmp/debug-move-failed.png`);
+    return false;
   }
 
   // Returns true if the game is over (any result).
