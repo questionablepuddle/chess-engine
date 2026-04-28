@@ -89,6 +89,16 @@ export function getLegalUciMoves(sanMoves: string[]): string[] {
   return chess.moves({ verbose: true }).map(m => m.from + m.to + (m.promotion ?? ''));
 }
 
+// Returns all legal moves from a FEN string, as UCI strings.
+export function getLegalUciMovesFromFen(fen: string): string[] {
+  try {
+    const chess = new Chess(fen);
+    return chess.moves({ verbose: true }).map(m => m.from + m.to + (m.promotion ?? ''));
+  } catch {
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Timing helpers
 // ---------------------------------------------------------------------------

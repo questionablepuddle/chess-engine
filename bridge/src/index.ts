@@ -2,7 +2,7 @@ import 'dotenv/config';
 import * as path from 'path';
 import { UCIEngine } from './engine';
 import { ChessDotCom } from './browser';
-import { getLegalUciMoves, sanMovesToUci, sleep, humanDelay, log } from './utils';
+import { getLegalUciMoves, getLegalUciMovesFromFen, sanMovesToUci, sleep, humanDelay, log } from './utils';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -60,27 +60,27 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     }
 
     // -----------------------------------------------------------------------
-    // Read position — prefer FEN (authoritative), fall back to SAN→UCI
+    // Read position — prefer FEN (authoritative), fall back to SAN→UCI.
+    // syncMoves() is still called for move-count tracking (turn detection and
+    // executeMove registration check) but the move content is only used when
+    // FEN is unavailable.
     // -----------------------------------------------------------------------
     const sanMoves = await browser.syncMoves();
     let fen = await browser.readFen();
+    let legalMoves: string[];
 
     if (fen) {
-      log('Main', `Position from FEN (${sanMoves.length} moves on board)`);
+      log('Main', `Position from FEN (${sanMoves.length} SAN moves counted)`);
+      legalMoves = getLegalUciMovesFromFen(fen);
     } else {
       // FEN unavailable — fall back to SAN→UCI conversion
       const uciMoves = sanMovesToUci(sanMoves);
       log('Main', `FEN unavailable — using SAN→UCI (${uciMoves.length}/${sanMoves.length} moves)`);
-      // Synthesise a FEN from the move list so the engine interface stays uniform
       fen = uciMoves.length
-        ? `startpos moves ${uciMoves.join(' ')}`  // engine will receive "position startpos moves ..."
+        ? `startpos moves ${uciMoves.join(' ')}`
         : 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+      legalMoves = getLegalUciMoves(sanMoves);
     }
-
-    // -----------------------------------------------------------------------
-    // Pre-move legality check (uses SAN→UCI path regardless)
-    // -----------------------------------------------------------------------
-    const legalMoves = getLegalUciMoves(sanMoves);
 
     // -----------------------------------------------------------------------
     // Ask engine for best move

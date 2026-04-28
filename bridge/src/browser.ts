@@ -317,20 +317,47 @@ export class ChessDotCom {
   // ---------------------------------------------------------------------------
 
   // Read the current FEN from chess.com's board object or DOM attributes.
+  // Tries every known API surface and logs all results so we can see which works.
   async readFen(): Promise<string | null> {
-    const fen = await this.page.evaluate(() => {
-      // Try the board web-component API first
+    const probes = await this.page.evaluate(() => {
       const board = document.querySelector('chess-board') as any;
-      if (board?.game?.getFEN) return board.game.getFEN() as string;
-      if (board?.getFen)       return board.getFen() as string;
-      if (board?.fen)          return board.fen as string;
-      // Fallback: data attribute some chess.com versions expose
-      const attr = board?.getAttribute?.('fen');
-      if (attr) return attr;
-      return null;
+
+      const safe = (fn: () => any): any => {
+        try { return fn() ?? null; } catch { return null; }
+      };
+
+      return {
+        'board.game.getFEN()':            safe(() => board?.game?.getFEN?.()),
+        'board.game.fen()':               safe(() => board?.game?.fen?.()),
+        'board.getFen()':                 safe(() => board?.getFen?.()),
+        'board.fen':                      safe(() => board?.fen),
+        'board.getAttribute("fen")':      safe(() => board?.getAttribute?.('fen')),
+        'board.position':                 safe(() => board?.position),
+        'board.getAttribute("game").fen': safe(() => JSON.parse(board?.getAttribute?.('game') || '{}')?.fen),
+        'window.chessboard.getFen()':     safe(() => (window as any).chessboard?.getFen?.()),
+        '[fen] attr':                     safe(() => document.querySelector('[fen]')?.getAttribute('fen')),
+      };
     });
-    if (fen) log('Browser', `FEN: ${fen}`);
-    return fen;
+
+    // Log every probe so we can see what chess.com exposes
+    for (const [key, val] of Object.entries(probes)) {
+      const display = val === null ? 'null' : String(val).slice(0, 100);
+      log('Browser', `FEN probe [${key}]: ${display}`);
+    }
+
+    // Return the first value that looks like a FEN (contains slashes, 7+ parts)
+    const isFen = (v: any): v is string =>
+      typeof v === 'string' && v.split('/').length >= 7;
+
+    for (const [key, val] of Object.entries(probes)) {
+      if (isFen(val)) {
+        log('Browser', `Using FEN from [${key}]: ${val}`);
+        return val;
+      }
+    }
+
+    log('Browser', 'FEN: all probes returned null — will fall back to SAN');
+    return null;
   }
 
   // Returns ALL SAN move strings from the move list (including scrolled-out moves).
