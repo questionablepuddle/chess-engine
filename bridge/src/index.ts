@@ -151,7 +151,6 @@ async function main(): Promise<void> {
     log('Main', `Engine path: ${ENGINE_PATH}`);
     await engine.init();
     await browser.init();
-    await browser.login();
 
     let gameNumber = 0;
     while (!stopping) {

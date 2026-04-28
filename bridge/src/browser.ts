@@ -1,5 +1,5 @@
-import { chromium, Browser, BrowserContext, Page } from 'playwright';
-import * as fs from 'fs';
+import { chromium, BrowserContext, Page } from 'playwright';
+import { execSync } from 'child_process';
 import * as path from 'path';
 import { squareToClass, sleep, humanDelay, randomBetween, log } from './utils';
 
@@ -84,14 +84,11 @@ const SEL = {
   ],
 };
 
-const STORAGE_PATH = path.join(__dirname, '..', 'storage.json');
-
 // ---------------------------------------------------------------------------
 // ChessDotCom — main browser automation class
 // ---------------------------------------------------------------------------
 
 export class ChessDotCom {
-  private browser!: Browser;
   private context!: BrowserContext;
   page!: Page;
 
@@ -99,105 +96,45 @@ export class ChessDotCom {
   ourColor: 'white' | 'black' = 'white';
 
   // ---------------------------------------------------------------------------
-  // Initialisation
+  // Initialisation — use real Chrome with the user's existing profile so
+  // chess.com sees a genuine browser (avoids Cloudflare bot detection).
   // ---------------------------------------------------------------------------
 
   async init(): Promise<void> {
-    const headless = process.env.HEADLESS !== 'false';
-    this.browser = await chromium.launch({
-      headless,
+    const userDataDir =
+      process.env.CHROME_PROFILE ??
+      path.join(process.env.HOME ?? '~', 'Library', 'Application Support', 'Google', 'Chrome');
+
+    // Warn if Chrome is already running — it locks the profile directory
+    try {
+      execSync('pgrep -x "Google Chrome"', { stdio: 'ignore' });
+      console.warn(
+        '\nWARNING: Google Chrome appears to be running.\n' +
+        'Close Chrome before starting this script, or set CHROME_PROFILE\n' +
+        'to a separate profile directory (e.g. /tmp/chess-profile).\n',
+      );
+    } catch {
+      // pgrep exits non-zero when no match — Chrome is not running, good
+    }
+
+    log('Browser', `Launching Chrome with profile: ${userDataDir}`);
+
+    this.context = await chromium.launchPersistentContext(userDataDir, {
+      headless: false,
+      channel: 'chrome',
       args: [
         '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',
+        '--no-first-run',
+        '--no-default-browser-check',
       ],
+      ignoreDefaultArgs: ['--enable-automation'],
     });
 
-    const ctxOpts = {
-      viewport: { width: 1280, height: 900 },
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-        '(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      locale: 'en-US',
-    };
-
-    if (fs.existsSync(STORAGE_PATH)) {
-      log('Browser', 'Loading saved session from storage.json');
-      this.context = await this.browser.newContext({
-        ...ctxOpts,
-        storageState: STORAGE_PATH,
-      });
-    } else {
-      this.context = await this.browser.newContext(ctxOpts);
-    }
-
-    this.page = await this.context.newPage();
-
-    // Mask webdriver flag
-    await this.page.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
+    // Reuse the first page if Chrome opened one, otherwise open a new tab
+    const pages = this.context.pages();
+    this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
 
     log('Browser', 'Browser ready');
-  }
-
-  // ---------------------------------------------------------------------------
-  // Login
-  // ---------------------------------------------------------------------------
-
-  async login(): Promise<void> {
-    await this.page.goto('https://www.chess.com/', { waitUntil: 'domcontentloaded' });
-    await sleep(1500);
-
-    if (await this.isLoggedIn()) {
-      log('Browser', 'Already logged in — skipping manual login');
-      return;
-    }
-
-    // Not logged in — loop until the user confirms login
-    while (true) {
-      console.log('\n========================================');
-      console.log('Please log in to chess.com in the browser window,');
-      console.log('then press ENTER in this terminal when done...');
-      console.log('========================================\n');
-
-      await new Promise<void>(resolve => process.stdin.once('data', () => resolve()));
-
-      // Re-check — reload the page to get fresh DOM state
-      await this.page.reload({ waitUntil: 'domcontentloaded' });
-      await sleep(1500);
-
-      if (await this.isLoggedIn()) {
-        log('Browser', 'Login confirmed');
-        break;
-      }
-
-      console.log('Not logged in yet — please try again.');
-    }
-
-    await this.context.storageState({ path: STORAGE_PATH });
-    log('Browser', 'Session saved to storage.json');
-  }
-
-  private async isLoggedIn(): Promise<boolean> {
-    // Look for elements that only exist when authenticated
-    const loggedInSelectors = [
-      '[data-user-username]',
-      '.user-username-component',
-      'a[href*="/member/"]',
-      '[class*="user-tagline-username"]',
-      '[class*="header-user-tagline"]',
-      'a[class*="user-tagline"]',
-    ];
-    for (const sel of loggedInSelectors) {
-      try {
-        const visible = await this.page.locator(sel).first().isVisible({ timeout: 2_000 });
-        if (visible) {
-          log('Browser', `Logged-in indicator found: ${sel}`);
-          return true;
-        }
-      } catch {}
-    }
-    return false;
   }
 
   // ---------------------------------------------------------------------------
@@ -383,7 +320,7 @@ export class ChessDotCom {
   // ---------------------------------------------------------------------------
 
   async close(): Promise<void> {
-    await this.browser?.close();
+    await this.context?.close();
   }
 
   // ---------------------------------------------------------------------------
