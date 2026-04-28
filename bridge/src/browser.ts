@@ -124,10 +124,9 @@ export class ChessDotCom {
         waitUntil: 'domcontentloaded',
         timeout: 30_000,
       });
-      log('Browser', `Navigation complete — URL: ${this.page.url()}`);
+      log('Browser', `URL: ${this.page.url()}`);
     } catch (err) {
-      log('Browser', `ERROR: goto() failed: ${err}`);
-      log('Browser', `Keeping browser open for inspection — URL: ${this.page.url()}`);
+      log('Browser', `ERROR: goto() failed — keeping browser open: ${err}`);
       throw err;
     }
 
@@ -196,168 +195,42 @@ export class ChessDotCom {
   // ---------------------------------------------------------------------------
 
   async startGameVsBot(): Promise<void> {
+    const bot = (process.env.BOT_NAME ?? 'martin').toLowerCase();
 
-    // Reload the page in case we're returning for a second game
-    if (!this.page.url().includes('/play/computer')) {
-      await this.page.goto('https://www.chess.com/play/computer', {
-        waitUntil: 'domcontentloaded',
-        timeout: 30_000,
-      });
-    }
-    await sleep(3000);
-    await this.dismissPopups();
-
-    // -----------------------------------------------------------------------
-    // DOM debug — log all bot-related elements so we can find the right selector
-    // -----------------------------------------------------------------------
-    log('Browser', '=== DOM DEBUG: [class*="bot"] elements ===');
-    const botElements = await this.page.evaluate(() =>
-      Array.from(document.querySelectorAll('[class*="bot"]'))
-        .map(el => ({
-          tag: el.tagName,
-          className: el.className,
-          text: el.textContent?.trim().slice(0, 50),
-          ariaLabel: el.getAttribute('aria-label'),
-          title: el.getAttribute('title'),
-          dataUsername: el.getAttribute('data-username'),
-        }))
-        .filter(el => el.text || el.ariaLabel || el.title)
-        .slice(0, 30)
-    );
-    botElements.forEach((el, i) => log('Browser', `[${i}] ${JSON.stringify(el)}`));
-
-    log('Browser', '=== DOM DEBUG: bot-card / bot-item / computer-game elements ===');
-    const cardElements = await this.page.evaluate(() =>
-      Array.from(document.querySelectorAll('[class*="bot-card"], [class*="bot-item"], [class*="computer-game"]'))
-        .map(el => ({
-          tag: el.tagName,
-          className: el.className,
-          text: el.textContent?.trim().slice(0, 50),
-          ariaLabel: el.getAttribute('aria-label'),
-          title: el.getAttribute('title'),
-          dataUsername: el.getAttribute('data-username'),
-        }))
-        .filter(el => el.text || el.ariaLabel || el.title)
-    );
-    cardElements.forEach((el, i) => log('Browser', `[card:${i}] ${JSON.stringify(el)}`));
-    // -----------------------------------------------------------------------
-
-    // --- Count bot cards currently visible (The Circus section) ---
-    // We need to know how many are already on screen BEFORE expanding Beginner
-    // so we can skip them and click only the first newly-revealed Beginner card.
-    const CIRCUS_BOT_COUNT = 5; // The Circus always shows exactly 5 bots
-
-    log('Browser', 'Clicking Beginner category header…');
-
-    // Use text= locator — most direct match for the "Beginner  15 bots" row
-    let categoryClicked = false;
-    const categoryAttempts = [
-      `text=Beginner`,
-      `button:has-text("Beginner")`,
-      `[class*="bot-group"]:has-text("Beginner")`,
-      `[class*="category"]:has-text("Beginner")`,
-      `[class*="section-header"]:has-text("Beginner")`,
-      `[class*="group-header"]:has-text("Beginner")`,
-      `h2:has-text("Beginner")`,
-      `h3:has-text("Beginner")`,
+    // Navigate directly to the bot — no UI card-clicking needed.
+    // Try ?opponent= first; fall back to ?computer= if the board doesn't load.
+    const urls = [
+      `https://www.chess.com/play/computer?opponent=${bot}`,
+      `https://www.chess.com/play/computer?computer=${bot}`,
     ];
 
-    for (const sel of categoryAttempts) {
-      try {
-        const el = this.page.locator(sel).first();
-        if (await el.isVisible({ timeout: 1_500 })) {
-          await this.humanClick(el);
-          log('Browser', `Clicked Beginner header via: ${sel}`);
-          categoryClicked = true;
-          break;
-        }
-      } catch {}
-    }
+    let boardFound = false;
+    for (const url of urls) {
+      log('Browser', `Navigating to ${url}`);
+      await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await sleep(2_000);
+      await this.dismissPopups();
 
-    if (!categoryClicked) {
-      await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
-      throw new Error('Could not find Beginner category header — screenshot at /tmp/debug-bot-select.png');
-    }
-
-    // Wait for Beginner bots to render
-    await sleep(2_000);
-
-    // --- Click the first Beginner bot card (Martin) ---
-    // The Circus has CIRCUS_BOT_COUNT cards already visible; Beginner's
-    // cards appear after them in DOM order. Skip the first CIRCUS_BOT_COUNT
-    // and take index 0 of the remainder.
-    const cardSelectors = [
-      '[class*="bot-card"]',
-      '[class*="bot-avatar"]',
-      '[class*="bot-item"]',
-      '[class*="computer-card"]',
-      '[class*="bot-list"] [class*="card"]',
-      '[class*="bot-list"] li',
-      '[class*="bots-list"] li',
-    ];
-
-    let clicked = false;
-    for (const sel of cardSelectors) {
-      try {
-        const cards = this.page.locator(sel);
-        const count = await cards.count();
-        if (count > CIRCUS_BOT_COUNT) {
-          const martinCard = cards.nth(CIRCUS_BOT_COUNT); // first Beginner card
-          await this.humanClick(martinCard);
-          log('Browser', `Clicked Beginner[0] (card index ${CIRCUS_BOT_COUNT} of ${count}) via: ${sel}`);
-          clicked = true;
-          break;
-        }
-      } catch {}
-    }
-
-    if (!clicked) {
-      await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
-      throw new Error(
-        `Could not find enough bot cards to skip The Circus (need >${CIRCUS_BOT_COUNT}) — ` +
-        `screenshot at /tmp/debug-bot-select.png`,
-      );
-    }
-
-    await sleep(1_000);
-
-    // --- Read selected bot name from right panel ---
-    const selectedName = await this.page.evaluate(() => {
-      const selectors = [
-        '[class*="bot-name"]',
-        '[class*="computer-name"]',
-        '[class*="panel"] h2',
-        '[class*="panel"] h3',
-        '[class*="sidebar"] h2',
-        '[class*="sidebar"] h3',
-        '[class*="details"] h2',
-        '[class*="opponent-name"]',
-      ];
-      for (const sel of selectors) {
-        const el = document.querySelector(sel);
-        const text = el?.textContent?.trim();
-        if (text) return text;
+      // Check if the Play button appeared (means the bot was recognised)
+      const playBtn = await this.firstVisible(SEL.playButton, 5_000);
+      if (playBtn) {
+        log('Browser', `Play button found — clicking`);
+        await this.humanClick(playBtn);
+        boardFound = true;
+        break;
       }
-      return '(unknown)';
-    });
-    log('Browser', `Selected bot: ${selectedName}`);
 
-    await this.page.screenshot({ path: '/tmp/debug-bot-selected.png' });
-    log('Browser', 'Bot selection screenshot: /tmp/debug-bot-selected.png');
-
-    // --- Click the green Play button ---
-    const playBtn = await this.firstVisible(SEL.playButton, 6_000);
-    if (playBtn) {
-      await this.humanClick(playBtn);
-      log('Browser', 'Clicked Play button');
-    } else {
-      log('Browser', 'No Play button found — game may start automatically');
+      log('Browser', `No Play button at ${url} — trying next URL`);
     }
 
-    // --- Wait for the board to become interactive ---
+    if (!boardFound) {
+      await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
+      throw new Error(`Could not start game vs "${bot}" — screenshot at /tmp/debug-bot-select.png`);
+    }
+
+    // --- Wait for the board ---
     await this.waitForBoard();
 
-    // Screenshot to confirm board loaded
     await this.page.screenshot({ path: '/tmp/debug-game-start.png' });
     log('Browser', 'Game start screenshot: /tmp/debug-game-start.png');
 
