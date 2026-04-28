@@ -19,18 +19,19 @@ endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -flto -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fsanitize=address,undefined")
 
-# Check for AVX2
-include(CheckCXXCompilerFlag)
-check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
-if(COMPILER_SUPPORTS_AVX2)
-    add_compile_options(-mavx2)
-    add_compile_definitions(USE_AVX2)
-endif()
-
-# Check for POPCNT
-check_cxx_compiler_flag("-mpopcnt" COMPILER_SUPPORTS_POPCNT)
-if(COMPILER_SUPPORTS_POPCNT)
-    add_compile_options(-mpopcnt)
+# x86-only: AVX2 + POPCNT (both the compiler flags and the USE_AVX2 define)
+# On ARM/Apple Silicon these blocks are skipped entirely.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+    if(COMPILER_SUPPORTS_AVX2)
+        add_compile_options(-mavx2)
+        add_compile_definitions(USE_AVX2)
+    endif()
+    check_cxx_compiler_flag("-mpopcnt" COMPILER_SUPPORTS_POPCNT)
+    if(COMPILER_SUPPORTS_POPCNT)
+        add_compile_options(-mpopcnt)
+    endif()
 endif()
 
 # Source files

@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <iostream>
 
-#ifdef USE_AVX2
+#if defined(__x86_64__) && defined(USE_AVX2)
 #include <immintrin.h>
 #endif
 
@@ -89,7 +89,7 @@ void addFeature(Accumulator& acc, Color perspective, int featureIdx) {
     int16_t* side = (perspective == WHITE) ? acc.white : acc.black;
     const int16_t* w = &net.ft_weights[featureIdx * HIDDEN_SIZE];
 
-#ifdef USE_AVX2
+#if defined(__x86_64__) && defined(USE_AVX2)
     for (int i = 0; i < HIDDEN_SIZE; i += 16) {
         __m256i a = _mm256_load_si256((__m256i*)(side + i));
         __m256i b = _mm256_load_si256((__m256i*)(w + i));
@@ -105,7 +105,7 @@ void removeFeature(Accumulator& acc, Color perspective, int featureIdx) {
     int16_t* side = (perspective == WHITE) ? acc.white : acc.black;
     const int16_t* w = &net.ft_weights[featureIdx * HIDDEN_SIZE];
 
-#ifdef USE_AVX2
+#if defined(__x86_64__) && defined(USE_AVX2)
     for (int i = 0; i < HIDDEN_SIZE; i += 16) {
         __m256i a = _mm256_load_si256((__m256i*)(side + i));
         __m256i b = _mm256_load_si256((__m256i*)(w + i));
@@ -131,7 +131,7 @@ int evaluate(const Accumulator& acc, Color stm) {
 
     int32_t output = net.l1_biases[0];
 
-#ifdef USE_AVX2
+#if defined(__x86_64__) && defined(USE_AVX2)
     __m256i zero = _mm256_setzero_si256();
     __m256i max_val = _mm256_set1_epi16(127);
     __m256i sum = _mm256_setzero_si256();
