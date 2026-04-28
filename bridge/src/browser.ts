@@ -1,5 +1,7 @@
 import { chromium, BrowserContext, Page } from 'playwright';
 import { execSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { squareToClass, sleep, humanDelay, randomBetween, log } from './utils';
 
@@ -103,15 +105,17 @@ export class ChessDotCom {
   async init(): Promise<void> {
     const userDataDir =
       process.env.CHROME_PROFILE ??
-      path.join(process.env.HOME ?? '~', 'Library', 'Application Support', 'Google', 'Chrome');
+      path.join(os.homedir(), '.chess-bot-profile');
 
-    // Warn if Chrome is already running — it locks the profile directory
+    const isNewProfile = !fs.existsSync(path.join(userDataDir, 'Default'));
+
+    // Warn if Chrome is already running with this profile — it locks the directory
     try {
       execSync('pgrep -x "Google Chrome"', { stdio: 'ignore' });
       console.warn(
         '\nWARNING: Google Chrome appears to be running.\n' +
-        'Close Chrome before starting this script, or set CHROME_PROFILE\n' +
-        'to a separate profile directory (e.g. /tmp/chess-profile).\n',
+        'Close Chrome before starting this script, or the profile\n' +
+        `directory may be locked: ${userDataDir}\n`,
       );
     } catch {
       // pgrep exits non-zero when no match — Chrome is not running, good
@@ -134,18 +138,77 @@ export class ChessDotCom {
     const pages = this.context.pages();
     this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
 
-    log('Browser', `Browser ready — navigating to chess.com/play/computer`);
+    log('Browser', `Navigating to chess.com…`);
     try {
-      await this.page.goto('https://www.chess.com/play/computer', {
+      await this.page.goto('https://www.chess.com/', {
         waitUntil: 'domcontentloaded',
         timeout: 30_000,
       });
-      log('Browser', `Navigation complete — current URL: ${this.page.url()}`);
+      log('Browser', `Navigation complete — URL: ${this.page.url()}`);
     } catch (err) {
       log('Browser', `ERROR: goto() failed: ${err}`);
-      log('Browser', `Keeping browser open for inspection — current URL: ${this.page.url()}`);
+      log('Browser', `Keeping browser open for inspection — URL: ${this.page.url()}`);
       throw err;
     }
+
+    await this.ensureLoggedIn(isNewProfile);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Login — manual flow using the persistent profile
+  // ---------------------------------------------------------------------------
+
+  private async ensureLoggedIn(isNewProfile: boolean): Promise<void> {
+    await sleep(1500);
+
+    if (await this.isLoggedIn()) {
+      log('Browser', 'Already logged in');
+      return;
+    }
+
+    const firstRunMsg = isNewProfile
+      ? 'This is a fresh Chrome profile. Please log in to chess.com in the browser window,'
+      : 'Session expired. Please log in to chess.com in the browser window,';
+
+    while (true) {
+      console.log('\n========================================');
+      console.log(firstRunMsg);
+      console.log('then press ENTER in this terminal when done...');
+      console.log('========================================\n');
+
+      await new Promise<void>(resolve => process.stdin.once('data', () => resolve()));
+
+      await this.page.reload({ waitUntil: 'domcontentloaded' });
+      await sleep(1500);
+
+      if (await this.isLoggedIn()) {
+        log('Browser', 'Login confirmed — session will persist in profile');
+        break;
+      }
+
+      console.log('Not logged in yet — please try again.');
+    }
+  }
+
+  private async isLoggedIn(): Promise<boolean> {
+    const loggedInSelectors = [
+      '[data-user-username]',
+      '.user-username-component',
+      'a[href*="/member/"]',
+      '[class*="user-tagline-username"]',
+      '[class*="header-user-tagline"]',
+      'a[class*="user-tagline"]',
+    ];
+    for (const sel of loggedInSelectors) {
+      try {
+        const visible = await this.page.locator(sel).first().isVisible({ timeout: 2_000 });
+        if (visible) {
+          log('Browser', `Logged-in indicator: ${sel}`);
+          return true;
+        }
+      } catch {}
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------------
