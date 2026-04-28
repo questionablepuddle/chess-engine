@@ -49,14 +49,13 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     // -----------------------------------------------------------------------
     // Read board state
     // -----------------------------------------------------------------------
-    // syncMoves() gives us the move COUNT (for turn parity and executeMove
-    // registration detection). The SAN content is never parsed for position.
+    // syncMoves() gives us the move COUNT only (for turn parity and
+    // executeMove registration detection). The SAN content is never used.
     const domSanMoves = await browser.syncMoves();
     const moveCount = domSanMoves.length;
 
-    // Read actual piece positions from the rendered DOM — no SAN parsing.
-    // Active color is inferred from moveCount (even = white, odd = black).
-    const fen = await browser.readBoardFen(moveCount);
+    // Read piece positions directly from rendered DOM elements — no SAN parsing.
+    const fen = await browser.readBoardAsFen(ourColor === 'white', moveCount);
     if (!fen) {
       log('Main', 'Cannot read board FEN — skipping turn, retrying in 500 ms');
       await sleep(500);
