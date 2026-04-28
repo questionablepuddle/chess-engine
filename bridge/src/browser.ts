@@ -242,38 +242,50 @@ export class ChessDotCom {
     cardElements.forEach((el, i) => log('Browser', `[card:${i}] ${JSON.stringify(el)}`));
     // -----------------------------------------------------------------------
 
-    log('Browser', 'Expanding Beginner category…');
+    // --- Count bot cards currently visible (The Circus section) ---
+    // We need to know how many are already on screen BEFORE expanding Beginner
+    // so we can skip them and click only the first newly-revealed Beginner card.
+    const CIRCUS_BOT_COUNT = 5; // The Circus always shows exactly 5 bots
 
-    // --- Expand the "Beginner" category ---
-    const categorySelectors = [
+    log('Browser', 'Clicking Beginner category header…');
+
+    // Use text= locator — most direct match for the "Beginner  15 bots" row
+    let categoryClicked = false;
+    const categoryAttempts = [
+      `text=Beginner`,
+      `button:has-text("Beginner")`,
       `[class*="bot-group"]:has-text("Beginner")`,
       `[class*="category"]:has-text("Beginner")`,
       `[class*="section-header"]:has-text("Beginner")`,
       `[class*="group-header"]:has-text("Beginner")`,
-      `[class*="accordion"]:has-text("Beginner")`,
-      `button:has-text("Beginner")`,
       `h2:has-text("Beginner")`,
       `h3:has-text("Beginner")`,
-      `[class*="header"]:has-text("Beginner")`,
-      `[class*="title"]:has-text("Beginner")`,
     ];
 
-    for (const sel of categorySelectors) {
+    for (const sel of categoryAttempts) {
       try {
         const el = this.page.locator(sel).first();
         if (await el.isVisible({ timeout: 1_500 })) {
           await this.humanClick(el);
-          log('Browser', `Clicked category header: ${sel}`);
+          log('Browser', `Clicked Beginner header via: ${sel}`);
+          categoryClicked = true;
           break;
         }
       } catch {}
     }
 
-    // Wait for cards to render
+    if (!categoryClicked) {
+      await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
+      throw new Error('Could not find Beginner category header — screenshot at /tmp/debug-bot-select.png');
+    }
+
+    // Wait for Beginner bots to render
     await sleep(2_000);
 
-    // --- Click the first bot card in the Beginner section ---
-    // Bot names only appear as hover tooltips — select by position, not text
+    // --- Click the first Beginner bot card (Martin) ---
+    // The Circus has CIRCUS_BOT_COUNT cards already visible; Beginner's
+    // cards appear after them in DOM order. Skip the first CIRCUS_BOT_COUNT
+    // and take index 0 of the remainder.
     const cardSelectors = [
       '[class*="bot-card"]',
       '[class*="bot-avatar"]',
@@ -289,9 +301,10 @@ export class ChessDotCom {
       try {
         const cards = this.page.locator(sel);
         const count = await cards.count();
-        if (count > 0) {
-          await this.humanClick(cards.first());
-          log('Browser', `Clicked first bot card (${count} found) via: ${sel}`);
+        if (count > CIRCUS_BOT_COUNT) {
+          const martinCard = cards.nth(CIRCUS_BOT_COUNT); // first Beginner card
+          await this.humanClick(martinCard);
+          log('Browser', `Clicked Beginner[0] (card index ${CIRCUS_BOT_COUNT} of ${count}) via: ${sel}`);
           clicked = true;
           break;
         }
@@ -300,7 +313,10 @@ export class ChessDotCom {
 
     if (!clicked) {
       await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
-      throw new Error('Could not find any bot cards — screenshot at /tmp/debug-bot-select.png');
+      throw new Error(
+        `Could not find enough bot cards to skip The Circus (need >${CIRCUS_BOT_COUNT}) — ` +
+        `screenshot at /tmp/debug-bot-select.png`,
+      );
     }
 
     await sleep(1_000);
