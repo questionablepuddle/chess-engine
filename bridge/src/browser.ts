@@ -68,11 +68,6 @@ const SEL = {
     'button:has-text("Rematch")',
   ],
 
-  // Login page
-  loginUsername: ['#username', 'input[name="username"]', 'input[autocomplete="username"]'],
-  loginPassword: ['#password', 'input[name="password"]', 'input[type="password"]'],
-  loginSubmit: ['button[type="submit"]', '.login-btn', 'button:has-text("Log In")', 'button:has-text("Sign In")'],
-
   // Bot selection on /play/computer
   botCard: (name: string) => [
     `[class*="bot-card"]:has-text("${name}")`,
@@ -150,143 +145,34 @@ export class ChessDotCom {
   // ---------------------------------------------------------------------------
 
   async login(): Promise<void> {
-    const username = process.env.CHESSDOTCOM_USERNAME!;
-    const password = process.env.CHESSDOTCOM_PASSWORD!;
+    await this.page.goto('https://www.chess.com/', { waitUntil: 'domcontentloaded' });
+    await sleep(1500);
 
-    try {
-      // Always start fresh — delete stale session
-      if (fs.existsSync(STORAGE_PATH)) {
-        fs.unlinkSync(STORAGE_PATH);
-        log('Browser', 'Deleted stale storage.json');
-      }
-    } catch (e) {
-      log('Browser', `Warning: could not delete storage.json: ${e}`);
+    if (await this.isLoggedIn()) {
+      log('Browser', 'Already logged in — skipping manual login');
+      return;
     }
 
-    log('Browser', `Logging in as ${username}…`);
+    // Not logged in — ask the user to do it manually in the browser window
+    console.log('\n========================================');
+    console.log('Please log in to chess.com in the browser window,');
+    console.log('then press ENTER to continue...');
+    console.log('========================================\n');
 
-    try {
-      await this.page.goto('https://www.chess.com/login', { waitUntil: 'domcontentloaded' });
-      log('Browser', 'Navigated to /login, waiting for networkidle…');
-      await this.page.waitForLoadState('networkidle', { timeout: 15_000 });
-      log('Browser', 'Page fully loaded');
-    } catch (e) {
-      log('Browser', `ERROR during navigation: ${e}`);
-      throw e;
-    }
+    await new Promise<void>(resolve => process.stdin.once('data', () => resolve()));
 
-    try {
-      await this.page.screenshot({ path: '/tmp/debug-login-start.png' });
-      log('Browser', 'Screenshot saved to /tmp/debug-login-start.png');
-    } catch (e) {
-      log('Browser', `Warning: screenshot failed: ${e}`);
-    }
+    await this.context.storageState({ path: STORAGE_PATH });
+    log('Browser', 'Session saved to storage.json');
+  }
 
-    try {
-      await this.dismissPopups();
-    } catch (e) {
-      log('Browser', `Warning: dismissPopups failed: ${e}`);
-    }
-
-    // --- Username field ---
-    let usernameSelector = '';
-    const userSelectors = ['#username', 'input[name="username"]', 'input[type="text"]', 'input[autocomplete="username"]'];
-    for (const sel of userSelectors) {
-      try {
-        await this.page.waitForSelector(sel, { timeout: 10_000 });
-        usernameSelector = sel;
-        log('Browser', `Found username field: ${sel}`);
-        break;
-      } catch (e) {
-        log('Browser', `Username selector not found: ${sel}`);
-      }
-    }
-    if (!usernameSelector) throw new Error('Cannot find username field — see /tmp/debug-login-start.png');
-
-    try {
-      await this.page.fill(usernameSelector, username);
-      log('Browser', 'Filled username');
-    } catch (e) {
-      log('Browser', `ERROR filling username: ${e}`);
-      throw e;
-    }
-
-    await sleep(400 + Math.random() * 300);
-
-    // --- Password field ---
-    let passwordSelector = '';
-    const passSelectors = ['#password', 'input[name="password"]', 'input[type="password"]'];
-    for (const sel of passSelectors) {
-      try {
-        await this.page.waitForSelector(sel, { timeout: 5_000 });
-        passwordSelector = sel;
-        log('Browser', `Found password field: ${sel}`);
-        break;
-      } catch (e) {
-        log('Browser', `Password selector not found: ${sel}`);
-      }
-    }
-    if (!passwordSelector) throw new Error('Cannot find password field');
-
-    try {
-      await this.page.fill(passwordSelector, password);
-      log('Browser', 'Filled password');
-    } catch (e) {
-      log('Browser', `ERROR filling password: ${e}`);
-      throw e;
-    }
-
-    await sleep(300 + Math.random() * 300);
-
-    // --- Submit button ---
-    const submitSelectors = ['button[type="submit"]', '.login-button', 'button:has-text("Log In")'];
-    let submitted = false;
-    for (const sel of submitSelectors) {
-      try {
-        await this.page.click(sel, { force: true, timeout: 5_000 });
-        log('Browser', `Clicked submit: ${sel}`);
-        submitted = true;
-        break;
-      } catch (e) {
-        log('Browser', `Submit selector failed: ${sel} — ${e}`);
-      }
-    }
-    if (!submitted) throw new Error('Cannot find or click submit button');
-
-    // Wait 5s flat then screenshot regardless of what happened
-    log('Browser', 'Waiting 5s after submit…');
-    await sleep(5_000);
-
-    try {
-      await this.page.screenshot({ path: '/tmp/debug-after-login.png' });
-      log('Browser', 'Post-submit screenshot saved to /tmp/debug-after-login.png');
-    } catch (e) {
-      log('Browser', `Warning: post-submit screenshot failed: ${e}`);
-    }
-
-    // If still on /login, assume CAPTCHA — wait 30s for manual solve
-    if (this.page.url().includes('/login')) {
-      log('Browser', 'Still on /login — possible CAPTCHA. Waiting 30s for manual solve…');
-      await sleep(30_000);
-    }
-
-    // Wait for redirect away from /login (up to 15s)
-    try {
-      await this.page.waitForFunction(
-        () => !window.location.href.includes('/login'),
-        { timeout: 15_000 },
-      );
-    } catch (e) {
-      log('Browser', `ERROR: still on /login after 15s: ${e}`);
-      throw new Error('Login failed — still on /login. Check /tmp/debug-after-login.png.');
-    }
-
-    try {
-      await this.context.storageState({ path: STORAGE_PATH });
-      log('Browser', 'Login successful, session saved');
-    } catch (e) {
-      log('Browser', `Warning: could not save storage state: ${e}`);
-    }
+  private async isLoggedIn(): Promise<boolean> {
+    // chess.com shows a "Sign Up" or "Log In" link when the user is a guest
+    const guestLink = await this.page
+      .locator('a[href*="/register"], a[href*="/login"], button:has-text("Sign Up"), a:has-text("Sign Up")')
+      .first()
+      .isVisible({ timeout: 3_000 })
+      .catch(() => false);
+    return !guestLink;
   }
 
   // ---------------------------------------------------------------------------
