@@ -216,31 +216,43 @@ export class ChessDotCom {
       log('Browser', `Beginner header not found or already expanded: ${e}`);
     }
 
-    // --- Find the first bot inside the Beginner section ---
-    // Walk up two levels from the header text to reach the section container,
-    // then pick the first image/button/bot element inside it.
-    log('Browser', 'Locating first bot in Beginner section…');
-    let botClicked = false;
-    try {
-      const beginnerHeader = this.page.locator('text="Beginner"').first();
-      const beginnerSection = beginnerHeader.locator('..').locator('..');
-      const firstBot = beginnerSection.locator('img, button, [class*="bot"]').first();
+    // --- Find the first Beginner bot by Y-coordinate band ---
+    // Locate the Beginner and Intermediate header Y positions, then find the
+    // first sufficiently large <img> whose top sits between those two values.
+    log('Browser', 'Finding first Beginner bot by coordinate…');
+    const martinCenter = await this.page.evaluate(() => {
+      // Find elements whose trimmed text is exactly "Beginner" or "Intermediate"
+      // and have few children (to avoid matching wrappers that contain the text).
+      const all = Array.from(document.querySelectorAll('*'));
+      const headers = all.filter(
+        el => el.children.length < 3 && el.textContent?.trim() === 'Beginner',
+      );
+      const nextHeaders = all.filter(
+        el => el.children.length < 3 && el.textContent?.trim() === 'Intermediate',
+      );
 
-      const box = await firstBot.boundingBox();
-      log('Browser', `First Beginner bot bounding box: ${JSON.stringify(box)}`);
+      const beginnerY = headers[0]?.getBoundingClientRect().top ?? -1;
+      const intermediateY = nextHeaders[0]?.getBoundingClientRect().top ?? 9999;
 
-      await firstBot.click();
-      log('Browser', 'Clicked first bot in Beginner section');
-      botClicked = true;
-    } catch (e) {
-      log('Browser', `Parent-traversal approach failed: ${e}`);
-    }
+      if (beginnerY < 0) return null;
 
-    // Fallback: screenshot so we can see the page state
-    if (!botClicked) {
+      const imgs = Array.from(document.querySelectorAll('img')).filter(img => {
+        const r = img.getBoundingClientRect();
+        return r.top > beginnerY && r.top < intermediateY && r.width > 30;
+      });
+
+      const r = imgs[0]?.getBoundingClientRect();
+      if (!r) return null;
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height };
+    });
+
+    if (!martinCenter) {
       await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
-      throw new Error('Could not click first Beginner bot — screenshot at /tmp/debug-bot-select.png');
+      throw new Error('Could not find first Beginner bot by coordinates — screenshot at /tmp/debug-bot-select.png');
     }
+
+    log('Browser', `First Beginner bot center: ${JSON.stringify(martinCenter)}`);
+    await this.page.mouse.click(martinCenter.x, martinCenter.y);
 
     await sleep(1_000);
 
@@ -393,16 +405,15 @@ export class ChessDotCom {
 
   private async waitForBoard(): Promise<void> {
     log('Browser', 'Waiting for board…');
-    for (const sel of SEL.board) {
-      try {
-        await this.page.waitForSelector(sel, { timeout: 15_000 });
-        log('Browser', `Board found: ${sel}`);
-        await sleep(500); // let it settle
-        return;
-      } catch {}
+    const combined = '.board, chess-board, [class*="board"]';
+    try {
+      await this.page.waitForSelector(combined, { timeout: 15_000 });
+      log('Browser', 'Board found');
+      await sleep(500);
+    } catch {
+      await this.page.screenshot({ path: '/tmp/debug-board-load.png' });
+      throw new Error('Chess board not found after 15s — screenshot at /tmp/debug-board-load.png');
     }
-    await this.page.screenshot({ path: '/tmp/debug-no-board.png' });
-    throw new Error('Chess board not found after 15s — screenshot at /tmp/debug-no-board.png');
   }
 
   // Detect whether we're playing white or black by checking board orientation.
