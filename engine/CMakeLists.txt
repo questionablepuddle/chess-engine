@@ -1,0 +1,91 @@
+cmake_minimum_required(VERSION 3.20)
+project(ChessEngine VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Compiler detection
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Wall -Wextra)
+endif()
+
+# Build type defaults
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# Release flags
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -flto -DNDEBUG")
+set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fsanitize=address,undefined")
+
+# Check for AVX2
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+if(COMPILER_SUPPORTS_AVX2)
+    add_compile_options(-mavx2)
+    add_compile_definitions(USE_AVX2)
+endif()
+
+# Check for POPCNT
+check_cxx_compiler_flag("-mpopcnt" COMPILER_SUPPORTS_POPCNT)
+if(COMPILER_SUPPORTS_POPCNT)
+    add_compile_options(-mpopcnt)
+endif()
+
+# Source files
+set(ENGINE_SOURCES
+    src/main.cpp
+    src/bitboard.cpp
+    src/position.cpp
+    src/movegen.cpp
+    src/search.cpp
+    src/evaluate.cpp
+    src/nnue.cpp
+    src/tt.cpp
+    src/history.cpp
+    src/timeman.cpp
+    src/book.cpp
+    src/uci.cpp
+    src/thread.cpp
+)
+
+# Main engine executable
+add_executable(chess_engine ${ENGINE_SOURCES})
+target_include_directories(chess_engine PRIVATE src)
+
+# Enable LTO for release
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set_property(TARGET chess_engine PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# Threads
+find_package(Threads REQUIRED)
+target_link_libraries(chess_engine PRIVATE Threads::Threads)
+
+# Perft test executable
+add_executable(perft_test
+    src/bitboard.cpp
+    src/position.cpp
+    src/movegen.cpp
+    tests/perft.cpp
+)
+target_include_directories(perft_test PRIVATE src)
+target_link_libraries(perft_test PRIVATE Threads::Threads)
+
+# Unit test executable
+add_executable(unit_tests
+    src/bitboard.cpp
+    src/position.cpp
+    src/movegen.cpp
+    src/evaluate.cpp
+    src/nnue.cpp
+    src/tt.cpp
+    src/history.cpp
+    tests/unit_tests.cpp
+)
+target_include_directories(unit_tests PRIVATE src)
+target_link_libraries(unit_tests PRIVATE Threads::Threads)
+
+# Install
+install(TARGETS chess_engine DESTINATION bin)
