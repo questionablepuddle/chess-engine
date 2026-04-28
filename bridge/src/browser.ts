@@ -195,46 +195,90 @@ export class ChessDotCom {
   // ---------------------------------------------------------------------------
 
   async startGameVsBot(): Promise<void> {
-    const bot = (process.env.BOT_NAME ?? 'martin').toLowerCase();
+    log('Browser', 'Navigating to chess.com/play/computer…');
+    await this.page.goto('https://www.chess.com/play/computer', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+    await sleep(2_000);
+    await this.dismissPopups();
 
-    // Navigate directly to the bot — no UI card-clicking needed.
-    // Try ?opponent= first; fall back to ?computer= if the board doesn't load.
-    const urls = [
-      `https://www.chess.com/play/computer?opponent=${bot}`,
-      `https://www.chess.com/play/computer?computer=${bot}`,
-    ];
-
-    let boardFound = false;
-    for (const url of urls) {
-      log('Browser', `Navigating to ${url}`);
-      await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-      await sleep(2_000);
-      await this.dismissPopups();
-
-      // Check if the Play button appeared (means the bot was recognised)
-      const playBtn = await this.firstVisible(SEL.playButton, 5_000);
-      if (playBtn) {
-        log('Browser', `Play button found — clicking`);
-        await this.humanClick(playBtn);
-        boardFound = true;
-        break;
+    // --- Expand Beginner section if not already open ---
+    log('Browser', 'Looking for Beginner header…');
+    try {
+      const header = this.page.locator('text="Beginner"').first();
+      if (await header.isVisible({ timeout: 5_000 })) {
+        await this.humanClick(header);
+        log('Browser', 'Clicked Beginner header');
+        await sleep(2_000);
       }
-
-      log('Browser', `No Play button at ${url} — trying next URL`);
+    } catch (e) {
+      log('Browser', `Beginner header not found or already expanded: ${e}`);
     }
 
-    if (!boardFound) {
+    // --- Find the first bot inside the Beginner section ---
+    // Walk up two levels from the header text to reach the section container,
+    // then pick the first image/button/bot element inside it.
+    log('Browser', 'Locating first bot in Beginner section…');
+    let botClicked = false;
+    try {
+      const beginnerHeader = this.page.locator('text="Beginner"').first();
+      const beginnerSection = beginnerHeader.locator('..').locator('..');
+      const firstBot = beginnerSection.locator('img, button, [class*="bot"]').first();
+
+      const box = await firstBot.boundingBox();
+      log('Browser', `First Beginner bot bounding box: ${JSON.stringify(box)}`);
+
+      await firstBot.click();
+      log('Browser', 'Clicked first bot in Beginner section');
+      botClicked = true;
+    } catch (e) {
+      log('Browser', `Parent-traversal approach failed: ${e}`);
+    }
+
+    // Fallback: screenshot so we can see the page state
+    if (!botClicked) {
       await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
-      throw new Error(`Could not start game vs "${bot}" — screenshot at /tmp/debug-bot-select.png`);
+      throw new Error('Could not click first Beginner bot — screenshot at /tmp/debug-bot-select.png');
     }
 
-    // --- Wait for the board ---
+    await sleep(1_000);
+
+    // --- Read selected bot name from right panel ---
+    const selectedName = await this.page.evaluate(() => {
+      const sels = [
+        '[class*="bot-name"]', '[class*="computer-name"]',
+        '[class*="panel"] h2', '[class*="panel"] h3',
+        '[class*="sidebar"] h2', '[class*="sidebar"] h3',
+        '[class*="opponent-name"]',
+      ];
+      for (const sel of sels) {
+        const text = document.querySelector(sel)?.textContent?.trim();
+        if (text) return text;
+      }
+      return '(unknown)';
+    });
+    log('Browser', `Selected bot: ${selectedName}`);
+
+    await this.page.screenshot({ path: '/tmp/debug-bot-selected.png' });
+    log('Browser', 'Bot selection screenshot: /tmp/debug-bot-selected.png');
+
+    // --- Click Play ---
+    const playBtn = await this.firstVisible(SEL.playButton, 6_000);
+    if (playBtn) {
+      await this.humanClick(playBtn);
+      log('Browser', 'Clicked Play button');
+    } else {
+      log('Browser', 'No Play button found — game may start automatically');
+    }
+
+    // --- Wait for board ---
     await this.waitForBoard();
 
     await this.page.screenshot({ path: '/tmp/debug-game-start.png' });
     log('Browser', 'Game start screenshot: /tmp/debug-game-start.png');
 
-    // --- Detect our colour ---
+    // --- Detect colour ---
     this.ourColor = await this.detectColor();
     log('Browser', `Playing as ${this.ourColor}`);
   }
