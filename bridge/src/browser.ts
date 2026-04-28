@@ -134,7 +134,18 @@ export class ChessDotCom {
     const pages = this.context.pages();
     this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
 
-    log('Browser', 'Browser ready');
+    log('Browser', `Browser ready — navigating to chess.com/play/computer`);
+    try {
+      await this.page.goto('https://www.chess.com/play/computer', {
+        waitUntil: 'domcontentloaded',
+        timeout: 30_000,
+      });
+      log('Browser', `Navigation complete — current URL: ${this.page.url()}`);
+    } catch (err) {
+      log('Browser', `ERROR: goto() failed: ${err}`);
+      log('Browser', `Keeping browser open for inspection — current URL: ${this.page.url()}`);
+      throw err;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -144,9 +155,13 @@ export class ChessDotCom {
   async startGameVsBot(): Promise<void> {
     const botName = process.env.BOT_NAME ?? 'Martin';
 
-    await this.page.goto('https://www.chess.com/play/computer', {
-      waitUntil: 'domcontentloaded',
-    });
+    // Reload the page in case we're returning for a second game
+    if (!this.page.url().includes('/play/computer')) {
+      await this.page.goto('https://www.chess.com/play/computer', {
+        waitUntil: 'domcontentloaded',
+        timeout: 30_000,
+      });
+    }
     await sleep(2000);
     await this.dismissPopups();
 
