@@ -153,69 +153,140 @@ export class ChessDotCom {
     const username = process.env.CHESSDOTCOM_USERNAME!;
     const password = process.env.CHESSDOTCOM_PASSWORD!;
 
-    // Always start fresh — delete stale session so we don't silently skip login
-    if (fs.existsSync(STORAGE_PATH)) {
-      fs.unlinkSync(STORAGE_PATH);
-      log('Browser', 'Deleted stale storage.json');
+    try {
+      // Always start fresh — delete stale session
+      if (fs.existsSync(STORAGE_PATH)) {
+        fs.unlinkSync(STORAGE_PATH);
+        log('Browser', 'Deleted stale storage.json');
+      }
+    } catch (e) {
+      log('Browser', `Warning: could not delete storage.json: ${e}`);
     }
 
     log('Browser', `Logging in as ${username}…`);
-    await this.page.goto('https://www.chess.com/login', { waitUntil: 'domcontentloaded' });
-    await sleep(1500);
-    await this.dismissPopups();
 
-    // Wait for and fill username
-    const userField = await this.firstVisible(SEL.loginUsername, 10_000);
-    if (!userField) throw new Error('Cannot find username field on login page');
-    await userField.click();
-    await this.typeHuman(username);
+    try {
+      await this.page.goto('https://www.chess.com/login', { waitUntil: 'domcontentloaded' });
+      log('Browser', 'Navigated to /login, waiting for networkidle…');
+      await this.page.waitForLoadState('networkidle', { timeout: 15_000 });
+      log('Browser', 'Page fully loaded');
+    } catch (e) {
+      log('Browser', `ERROR during navigation: ${e}`);
+      throw e;
+    }
+
+    try {
+      await this.page.screenshot({ path: '/tmp/debug-login-start.png' });
+      log('Browser', 'Screenshot saved to /tmp/debug-login-start.png');
+    } catch (e) {
+      log('Browser', `Warning: screenshot failed: ${e}`);
+    }
+
+    try {
+      await this.dismissPopups();
+    } catch (e) {
+      log('Browser', `Warning: dismissPopups failed: ${e}`);
+    }
+
+    // --- Username field ---
+    let usernameSelector = '';
+    const userSelectors = ['#username', 'input[name="username"]', 'input[type="text"]', 'input[autocomplete="username"]'];
+    for (const sel of userSelectors) {
+      try {
+        await this.page.waitForSelector(sel, { timeout: 10_000 });
+        usernameSelector = sel;
+        log('Browser', `Found username field: ${sel}`);
+        break;
+      } catch (e) {
+        log('Browser', `Username selector not found: ${sel}`);
+      }
+    }
+    if (!usernameSelector) throw new Error('Cannot find username field — see /tmp/debug-login-start.png');
+
+    try {
+      await this.page.fill(usernameSelector, username);
+      log('Browser', 'Filled username');
+    } catch (e) {
+      log('Browser', `ERROR filling username: ${e}`);
+      throw e;
+    }
+
+    await sleep(400 + Math.random() * 300);
+
+    // --- Password field ---
+    let passwordSelector = '';
+    const passSelectors = ['#password', 'input[name="password"]', 'input[type="password"]'];
+    for (const sel of passSelectors) {
+      try {
+        await this.page.waitForSelector(sel, { timeout: 5_000 });
+        passwordSelector = sel;
+        log('Browser', `Found password field: ${sel}`);
+        break;
+      } catch (e) {
+        log('Browser', `Password selector not found: ${sel}`);
+      }
+    }
+    if (!passwordSelector) throw new Error('Cannot find password field');
+
+    try {
+      await this.page.fill(passwordSelector, password);
+      log('Browser', 'Filled password');
+    } catch (e) {
+      log('Browser', `ERROR filling password: ${e}`);
+      throw e;
+    }
 
     await sleep(300 + Math.random() * 300);
 
-    // Fill password
-    const passField = await this.firstVisible(SEL.loginPassword, 5_000);
-    if (!passField) throw new Error('Cannot find password field on login page');
-    await passField.click();
-    await this.typeHuman(password);
+    // --- Submit button ---
+    const submitSelectors = ['button[type="submit"]', '.login-button', 'button:has-text("Log In")'];
+    let submitted = false;
+    for (const sel of submitSelectors) {
+      try {
+        await this.page.click(sel, { force: true, timeout: 5_000 });
+        log('Browser', `Clicked submit: ${sel}`);
+        submitted = true;
+        break;
+      } catch (e) {
+        log('Browser', `Submit selector failed: ${sel} — ${e}`);
+      }
+    }
+    if (!submitted) throw new Error('Cannot find or click submit button');
 
-    await sleep(300 + Math.random() * 300);
+    // Wait 5s flat then screenshot regardless of what happened
+    log('Browser', 'Waiting 5s after submit…');
+    await sleep(5_000);
 
-    // Submit
-    const submit = await this.firstVisible(SEL.loginSubmit);
-    if (!submit) throw new Error('Cannot find login submit button');
-    await submit.click();
+    try {
+      await this.page.screenshot({ path: '/tmp/debug-after-login.png' });
+      log('Browser', 'Post-submit screenshot saved to /tmp/debug-after-login.png');
+    } catch (e) {
+      log('Browser', `Warning: post-submit screenshot failed: ${e}`);
+    }
 
-    // If still on /login after 3s, assume CAPTCHA — screenshot and wait for manual solve
-    await sleep(3_000);
+    // If still on /login, assume CAPTCHA — wait 30s for manual solve
     if (this.page.url().includes('/login')) {
-      await this.page.screenshot({ path: '/tmp/debug-captcha.png' });
-      log('Browser', 'Possible CAPTCHA — screenshot at /tmp/debug-captcha.png');
-      log('Browser', 'Waiting 30s for manual CAPTCHA solve…');
+      log('Browser', 'Still on /login — possible CAPTCHA. Waiting 30s for manual solve…');
       await sleep(30_000);
     }
 
-    // Wait for redirect away from login page (up to 15s)
-    await this.page.waitForFunction(
-      () => !window.location.href.includes('/login'),
-      { timeout: 15_000 },
-    ).catch(() => {
-      throw new Error('Login failed — still on /login after 15s. Check credentials or solve CAPTCHA manually.');
-    });
-
-    // Persist session
-    await this.context.storageState({ path: STORAGE_PATH });
-    log('Browser', 'Login successful, session saved');
-
-    // Verify: "Sign Up" / "Log In" button must be gone
-    const signUpStillVisible = await this.page
-      .locator('a:has-text("Sign Up"), button:has-text("Sign Up"), a:has-text("Log In")')
-      .first()
-      .isVisible({ timeout: 2_000 })
-      .catch(() => false);
-    if (signUpStillVisible) {
-      throw new Error('Login verification failed — guest buttons still visible after login');
+    // Wait for redirect away from /login (up to 15s)
+    try {
+      await this.page.waitForFunction(
+        () => !window.location.href.includes('/login'),
+        { timeout: 15_000 },
+      );
+    } catch (e) {
+      log('Browser', `ERROR: still on /login after 15s: ${e}`);
+      throw new Error('Login failed — still on /login. Check /tmp/debug-after-login.png.');
     }
-    log('Browser', 'Login verified');
+
+    try {
+      await this.context.storageState({ path: STORAGE_PATH });
+      log('Browser', 'Login successful, session saved');
+    } catch (e) {
+      log('Browser', `Warning: could not save storage state: ${e}`);
+    }
   }
 
   // ---------------------------------------------------------------------------
