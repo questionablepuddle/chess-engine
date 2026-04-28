@@ -37,6 +37,7 @@ export class UCIEngine {
   async init(): Promise<void> {
     await this.spawnProc();
     await this.cmd('uci', 'uciok', 5_000);
+    this.write('setoption name MultiPV value 3');
     await this.cmd('isready', 'readyok', 5_000);
     log('Engine', `Ready  (${path.basename(this.enginePath)})`);
   }

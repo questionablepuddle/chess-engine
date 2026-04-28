@@ -202,15 +202,29 @@ export class ChessDotCom {
     // chess.com is a SPA — goto() on the same URL doesn't re-render the React
     // app on game 2+. Navigate away first then back to force a fresh load.
     log('Browser', 'Navigating to chess.com/play/computer…');
-    await this.page.goto('https://www.chess.com/', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30_000,
-    });
-    await sleep(1_000);
-    await this.page.goto('https://www.chess.com/play/computer', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30_000,
-    });
+    try {
+      await this.page.goto('https://www.chess.com/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 30_000,
+      });
+      await sleep(1_000);
+      await this.page.goto('https://www.chess.com/play/computer', {
+        waitUntil: 'domcontentloaded',
+        timeout: 30_000,
+      });
+    } catch (err) {
+      const msg = String(err).toLowerCase();
+      if (msg.includes('crash') || msg.includes('target closed') || msg.includes('connection closed')) {
+        log('Browser', `Page crash during navigation — relaunching context: ${err}`);
+        await this.relaunchContext();
+        await this.page.goto('https://www.chess.com/play/computer', {
+          waitUntil: 'domcontentloaded',
+          timeout: 30_000,
+        });
+      } else {
+        throw err;
+      }
+    }
     await this.page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {
       log('Browser', 'networkidle timeout — continuing anyway');
     });
@@ -570,6 +584,29 @@ export class ChessDotCom {
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  // Close a crashed browser context and open a fresh one in the same process.
+  // Reloads saved cookies so the session remains authenticated.
+  private async relaunchContext(): Promise<void> {
+    log('Browser', 'Closing crashed context and opening a fresh one…');
+    try { await this.context.close(); } catch {}
+
+    this.context = await this.browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+        'AppleWebKit/605.1.15 (KHTML, like Gecko) ' +
+        'Version/17.0 Safari/605.1.15',
+    });
+
+    if (fs.existsSync(COOKIES_PATH)) {
+      const saved = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
+      await this.context.addCookies(saved);
+      log('Browser', `Reloaded ${saved.length} cookies from ${COOKIES_PATH}`);
+    }
+
+    this.page = await this.context.newPage();
+    log('Browser', 'Fresh context ready');
+  }
 
   private async waitForBoard(): Promise<void> {
     log('Browser', 'Waiting for board…');

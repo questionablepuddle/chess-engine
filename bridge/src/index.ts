@@ -5,6 +5,12 @@ import { UCIEngine } from './engine';
 import { ChessDotCom } from './browser';
 import { sleep, humanDelay, log } from './utils';
 
+// Chess.com always promotes to queen via the handlePromotion dialog.
+// Normalise any engine promotion suggestion to queen so trackerChess stays
+// consistent with the actual board regardless of what the engine prefers.
+const queenPromo = (mv: string): string =>
+  mv.length === 5 ? mv.slice(0, 4) + 'q' : mv;
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -13,9 +19,36 @@ const ENGINE_PATH = process.env.ENGINE_PATH
   ? path.resolve(__dirname, '..', process.env.ENGINE_PATH)
   : path.resolve(__dirname, '../../engine/build/chess_engine');
 
-const MOVE_TIME_MS = 1_000;
+const MOVE_TIME_MS = 3_000;
 const GAME_DELAY_MIN = 5_000;
 const GAME_DELAY_MAX = 10_000;
+
+// ---------------------------------------------------------------------------
+// trackerChess helpers
+// ---------------------------------------------------------------------------
+
+// Rebuild a Chess instance by replaying every UCI move from scratch.
+// Used to recover from position drift without losing game history.
+function rebuildTrackerFromList(moveList: string[]): Chess {
+  const chess = new Chess();
+  for (const mv of moveList) {
+    try {
+      chess.move({
+        from: mv.slice(0, 2),
+        to:   mv.slice(2, 4),
+        ...(mv.length === 5 ? { promotion: mv[4] } : {}),
+      });
+    } catch (e) {
+      log('Main', `WARN: rebuildTracker failed replaying ${mv}: ${e}`);
+      break;
+    }
+  }
+  return chess;
+}
+
+function countPieces(chess: Chess): number {
+  return chess.board().flat().filter(Boolean).length;
+}
 
 // ---------------------------------------------------------------------------
 // Main game loop
@@ -32,8 +65,13 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
   // trackerChess is the single source of truth for position.
   //   Our moves  → applied directly with exact UCI coordinates.
   //   Opponent moves → detected via last-move highlight squares (light DOM).
-  const trackerChess = new Chess();
+  let trackerChess = new Chess();
   let knownPlyCount = 0; // half-moves already applied to trackerChess
+
+  // Full ordered list of every UCI move made so far (ours + opponent's).
+  // Used to rebuild trackerChess from scratch when sync drift is detected.
+  const masterMoveList: string[] = [];
+  let consecutiveIllegalCount = 0;
 
   // White moves at 0, 2, 4 … (even); black at 1, 3, 5 … (odd).
   let expectedMoveCount = ourColor === 'white' ? 0 : 1;
@@ -83,9 +121,14 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
           const move = candidates.find(m => !m.promotion)
                     ?? candidates.find(m => m.promotion === 'q')
                     ?? candidates[0];
-          trackerChess.move({ from: move.from, to: move.to, ...(move.promotion ? { promotion: move.promotion } : {}) });
+          // Always record opponent promotion as 'q' to match the board UI
+          const oppPromo = move.promotion ? 'q' : undefined;
+          const oppUCI   = `${move.from}${move.to}${oppPromo ?? ''}`;
+          trackerChess.move({ from: move.from, to: move.to, ...(oppPromo ? { promotion: oppPromo } : {}) });
+          masterMoveList.push(oppUCI);
           knownPlyCount++;
-          log('Main', `Opponent: ${move.from}${move.to}${move.promotion ?? ''}  [ply ${knownPlyCount}]`);
+          log('Main', `Opponent: ${oppUCI}  [ply ${knownPlyCount}]  pieces=${countPieces(trackerChess)}`);
+          log('Main', `FEN after opponent move: ${trackerChess.fen()}`);
           applied = true;
         }
       }
@@ -102,17 +145,29 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     const legalMoves = trackerChess.moves({ verbose: true })
       .map(m => `${m.from}${m.to}${m.promotion ?? ''}`);
 
+    log('Main', `Sending FEN to engine: ${fen}  pieces=${countPieces(trackerChess)}`);
+
     let bestMove: string;
     try {
-      bestMove = await engine.bestMove(fen, MOVE_TIME_MS);
+      bestMove = queenPromo(await engine.bestMove(fen, MOVE_TIME_MS));
     } catch (err) {
       log('Main', `Engine error: ${err} — restarting`);
       await engine.restart();
-      bestMove = await engine.bestMove(fen, MOVE_TIME_MS);
+      bestMove = queenPromo(await engine.bestMove(fen, MOVE_TIME_MS));
     }
 
     if (!legalMoves.includes(bestMove)) {
-      log('Main', `WARNING: engine move ${bestMove} not in legal list [${legalMoves.slice(0, 10).join(' ')}]`);
+      consecutiveIllegalCount++;
+      log('Main', `WARNING: engine move ${bestMove} not in legal list (illegal streak=${consecutiveIllegalCount})`);
+      if (consecutiveIllegalCount >= 2) {
+        log('Main', `DIAG — FEN: ${fen}`);
+        log('Main', `DIAG — legal moves: [${legalMoves.join(' ')}]`);
+        log('Main', `Rebuilding trackerChess from masterMoveList (${masterMoveList.length} moves): ${masterMoveList.join(' ')}`);
+        trackerChess = rebuildTrackerFromList(masterMoveList);
+        log('Main', `FEN after rebuild: ${trackerChess.fen()}  pieces=${countPieces(trackerChess)}`);
+      }
+    } else {
+      consecutiveIllegalCount = 0;
     }
 
     await humanDelay();
@@ -133,7 +188,7 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
 
       if (attempt < 2) {
         let nextMove = '';
-        try { nextMove = await engine.bestMove(fen, MOVE_TIME_MS); } catch {}
+        try { nextMove = queenPromo(await engine.bestMove(fen, MOVE_TIME_MS)); } catch {}
 
         if (!nextMove || failedMoves.has(nextMove)) {
           const alternatives = legalMoves.filter(m => !failedMoves.has(m));
@@ -158,8 +213,10 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     const promo = finalMove.length === 5 ? finalMove[4] : undefined;
     try {
       trackerChess.move({ from, to, ...(promo ? { promotion: promo } : {}) });
+      masterMoveList.push(finalMove);
       knownPlyCount++;
-      log('Main', `Our move: ${finalMove}  [ply ${knownPlyCount}]`);
+      log('Main', `Our move: ${finalMove}  [ply ${knownPlyCount}]  pieces=${countPieces(trackerChess)}`);
+      log('Main', `FEN after our move: ${trackerChess.fen()}`);
     } catch (err) {
       log('Main', `WARN: could not apply our move to trackerChess: ${err}`);
     }
