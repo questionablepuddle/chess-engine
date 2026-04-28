@@ -1,8 +1,9 @@
 import 'dotenv/config';
 import * as path from 'path';
+import { Chess } from 'chess.js';
 import { UCIEngine } from './engine';
 import { ChessDotCom } from './browser';
-import { getLegalUciMoves, getLegalUciMovesFromFen, sanMovesToUci, sleep, humanDelay, log } from './utils';
+import { applySanToBoard, sleep, humanDelay, log } from './utils';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -28,108 +29,130 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
 
   const ourColor = browser.ourColor;
 
-  // Move count when it's our turn:
-  //   White moves at  0, 2, 4, … (even indices)
-  //   Black moves at  1, 3, 5, … (odd indices)
-  let expectedMoveCount = ourColor === 'white' ? 0 : 1;
+  // masterMoveList is the authoritative UCI history for this game.
+  // Our moves are pushed directly (we know the exact UCI we played).
+  // Opponent moves are converted from the DOM SAN string using the known
+  // board position, so "f3" is correctly resolved as Nf3 vs pawn f3.
+  const masterMoveList: string[] = [];
+  const trackerChess = new Chess(); // mirrors masterMoveList at all times
 
-  log('Main', `We are ${ourColor} — first move expected at index ${expectedMoveCount}`);
+  // White moves at 0, 2, 4 … (even); black at 1, 3, 5 … (odd).
+  let expectedMoveCount = ourColor === 'white' ? 0 : 1;
+  log('Main', `We are ${ourColor} — first turn at move count ${expectedMoveCount}`);
 
   while (true) {
     // -----------------------------------------------------------------------
     // Wait for our turn
     // -----------------------------------------------------------------------
-    let actualCount: number;
     try {
-      actualCount = await browser.waitForOurTurn(expectedMoveCount);
+      await browser.waitForOurTurn(expectedMoveCount);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg === 'GAME_OVER') {
-        log('Main', 'Game over detected while waiting for our turn');
-        break;
-      }
+      if (msg === 'GAME_OVER') { log('Main', 'Game over while waiting'); break; }
       throw err;
     }
 
-    // -----------------------------------------------------------------------
-    // Check game over (belt-and-suspenders)
-    // -----------------------------------------------------------------------
-    if (await browser.isGameOver()) {
-      log('Main', 'Game over detected at top of loop');
-      break;
-    }
+    if (await browser.isGameOver()) { log('Main', 'Game over at top of loop'); break; }
 
     // -----------------------------------------------------------------------
-    // Read position — prefer FEN (authoritative), fall back to SAN→UCI.
-    // syncMoves() is still called for move-count tracking (turn detection and
-    // executeMove registration check) but the move content is only used when
-    // FEN is unavailable.
+    // Sync opponent moves from DOM into masterMoveList
     // -----------------------------------------------------------------------
-    const sanMoves = await browser.syncMoves();
-    let fen = await browser.readFen();
-    let legalMoves: string[];
+    // syncMoves() is used only for its COUNT (turn detection, executeMove check)
+    // and to extract the raw SAN text of new opponent moves.
+    const domSanMoves = await browser.syncMoves();
 
-    if (fen) {
-      log('Main', `Position from FEN (${sanMoves.length} SAN moves counted)`);
-      legalMoves = getLegalUciMovesFromFen(fen);
-    } else {
-      // FEN unavailable — fall back to SAN→UCI conversion
-      const uciMoves = sanMovesToUci(sanMoves);
-      log('Main', `FEN unavailable — using SAN→UCI (${uciMoves.length}/${sanMoves.length} moves)`);
-      fen = uciMoves.length
-        ? `startpos moves ${uciMoves.join(' ')}`
-        : 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-      legalMoves = getLegalUciMoves(sanMoves);
+    // Log FEN probes so we can see which chess.com API surface is live.
+    // We don't use the FEN for the engine — masterMoveList is authoritative.
+    await browser.readFen();
+
+    while (masterMoveList.length < domSanMoves.length) {
+      const san = domSanMoves[masterMoveList.length];
+      const uci = applySanToBoard(trackerChess, san);
+      if (uci) {
+        masterMoveList.push(uci);
+        log('Main', `Opponent: "${san}" → ${uci}  [ply ${masterMoveList.length}]`);
+      } else {
+        log('Main', `WARN: cannot parse opponent SAN "${san}" at ply ${masterMoveList.length} — position may drift`);
+        break;
+      }
     }
+
+    const positionStr = masterMoveList.length > 0
+      ? `startpos moves ${masterMoveList.join(' ')}`
+      : 'startpos';
+
+    const legalMoves = trackerChess.moves({ verbose: true })
+      .map(m => `${m.from}${m.to}${m.promotion ?? ''}`);
 
     // -----------------------------------------------------------------------
     // Ask engine for best move
     // -----------------------------------------------------------------------
     let bestMove: string;
     try {
-      bestMove = await engine.bestMove(fen, MOVE_TIME_MS);
+      bestMove = await engine.bestMove(positionStr, MOVE_TIME_MS);
     } catch (err) {
-      log('Main', `Engine error: ${err} — restarting engine`);
+      log('Main', `Engine error: ${err} — restarting`);
       await engine.restart();
-      bestMove = await engine.bestMove(fen, MOVE_TIME_MS);
+      bestMove = await engine.bestMove(positionStr, MOVE_TIME_MS);
     }
 
     if (!legalMoves.includes(bestMove)) {
-      log('Main', `WARNING: engine move ${bestMove} not in legal list: ${legalMoves.slice(0, 15).join(' ')}`);
+      log('Main', `WARNING: engine move ${bestMove} not in legal list [${legalMoves.slice(0, 10).join(' ')}]`);
     }
 
-    // -----------------------------------------------------------------------
-    // Human-like delay then execute
-    // -----------------------------------------------------------------------
     await humanDelay();
 
+    // -----------------------------------------------------------------------
+    // Execute — retry up to 3 times with different moves if needed
+    // -----------------------------------------------------------------------
+    const prevCount = domSanMoves.length;
+    const failedMoves = new Set<string>();
     let registered = false;
-    try {
-      registered = await browser.executeMove(bestMove, sanMoves.length);
-    } catch (err) {
-      log('Main', `Move execution threw: ${err}`);
-    }
+    let finalMove = bestMove;
 
-    if (!registered) {
-      log('Main', `${bestMove} failed to register — re-asking engine`);
-      try {
-        const freshFen = await browser.readFen() ?? fen;
-        const freshSan = await browser.syncMoves();
-        bestMove = await engine.bestMove(freshFen, MOVE_TIME_MS);
-        log('Main', `Retry move: ${bestMove}`);
-        await humanDelay();
-        await browser.executeMove(bestMove, freshSan.length);
-      } catch (err) {
-        log('Main', `Retry failed: ${err} — continuing`);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      registered = await browser.executeMove(finalMove, prevCount).catch(() => false);
+      if (registered) { bestMove = finalMove; break; }
+
+      log('Main', `Move ${finalMove} did not register (attempt ${attempt + 1}/3)`);
+      failedMoves.add(finalMove);
+
+      if (attempt < 2) {
+        // Re-ask engine; if it repeats a failed move, fall back to a random legal move
+        let nextMove = '';
+        try { nextMove = await engine.bestMove(positionStr, MOVE_TIME_MS); } catch {}
+
+        if (!nextMove || failedMoves.has(nextMove)) {
+          const alternatives = legalMoves.filter(m => !failedMoves.has(m));
+          if (alternatives.length === 0) { log('Main', 'No alternative moves left'); break; }
+          nextMove = alternatives[Math.floor(Math.random() * alternatives.length)];
+          log('Main', `Engine repeated a failed move — random fallback: ${nextMove}`);
+        }
+        finalMove = nextMove;
       }
     }
 
-    // -----------------------------------------------------------------------
-    // Advance expected move count: our move (+1) + opponent's reply (+1)
-    // -----------------------------------------------------------------------
-    expectedMoveCount = sanMoves.length + 2;
+    if (!registered) {
+      log('Main', 'All 3 move attempts failed — ending game');
+      break;
+    }
 
-    // Small safety pause after our move
+    // -----------------------------------------------------------------------
+    // Move registered — update tracker and master list
+    // -----------------------------------------------------------------------
+    const from = finalMove.slice(0, 2);
+    const to   = finalMove.slice(2, 4);
+    const promo = finalMove.length === 5 ? finalMove[4] : undefined;
+    try {
+      trackerChess.move({ from, to, ...(promo ? { promotion: promo } : {}) });
+    } catch (err) {
+      log('Main', `WARN: could not apply our move ${finalMove} to trackerChess: ${err}`);
+    }
+    masterMoveList.push(finalMove);
+    log('Main', `Our move: ${finalMove}  [ply ${masterMoveList.length}]`);
+
+    // Our move (+1) + opponent's reply (+1)
+    expectedMoveCount = domSanMoves.length + 2;
     await sleep(200);
   }
 
@@ -156,7 +179,6 @@ async function main(): Promise<void> {
   const engine = new UCIEngine(ENGINE_PATH);
   const browser = new ChessDotCom();
 
-  // Graceful shutdown
   let stopping = false;
   const shutdown = async () => {
     if (stopping) return;
@@ -189,7 +211,7 @@ async function main(): Promise<void> {
 
       if (stopping) break;
 
-      const delay = 5_000 + Math.random() * (GAME_DELAY_MAX - GAME_DELAY_MIN);
+      const delay = GAME_DELAY_MIN + Math.random() * (GAME_DELAY_MAX - GAME_DELAY_MIN);
       log('Main', `Waiting ${(delay / 1000).toFixed(1)}s before next game…`);
       await sleep(delay);
     }

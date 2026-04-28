@@ -80,6 +80,16 @@ function tryMove(chess: Chess, san: string) {
   }
 }
 
+// Apply a single SAN move (as displayed by chess.com) to a Chess instance.
+// Handles missing piece prefixes ("f3" for "Nf3") and annotation suffixes.
+// Returns the UCI string (e.g. "g1f3") on success, null if unparseable.
+// Mutates `chess` by applying the move.
+export function applySanToBoard(chess: Chess, san: string): string | null {
+  const m = tryParseSAN(chess, san);
+  if (!m) return null;
+  return m.from + m.to + (m.promotion ?? '');
+}
+
 // Returns all legal moves from the position after replaying sanMoves, as UCI strings.
 export function getLegalUciMoves(sanMoves: string[]): string[] {
   const chess = new Chess();
