@@ -90,8 +90,11 @@ export class ChessDotCom {
   private context!: BrowserContext;
   page!: Page;
 
-  // Detected at game start
   ourColor: 'white' | 'black' = 'white';
+
+  // Full move history accumulated across DOM scroll events.
+  // DOM only shows the last ~4 visible moves; this keeps the complete list.
+  private allMoves: string[] = [];
 
   // ---------------------------------------------------------------------------
   // Initialisation — WebKit (Safari engine) with saved cookie persistence
@@ -195,6 +198,7 @@ export class ChessDotCom {
   // ---------------------------------------------------------------------------
 
   async startGameVsBot(): Promise<void> {
+    this.allMoves = []; // reset move history for new game
     // chess.com is a SPA — goto() on the same URL doesn't re-render the React
     // app on game 2+. Navigate away first then back to force a fresh load.
     log('Browser', 'Navigating to chess.com/play/computer…');
@@ -389,6 +393,45 @@ export class ChessDotCom {
     return moves as string[];
   }
 
+  // Reconcile DOM-visible moves with our in-memory full history and return
+  // the complete list.  The DOM only shows the last ~4 moves when the list
+  // scrolls; this keeps the entire game history intact.
+  private reconcileMoves(visible: string[]): string[] {
+    if (visible.length === 0) return this.allMoves;
+
+    if (this.allMoves.length === 0) {
+      this.allMoves = [...visible];
+      return this.allMoves;
+    }
+
+    // Find the longest suffix of allMoves that matches a prefix of visible.
+    // That overlap is the "already-known" part; anything after it is new.
+    const maxOverlap = Math.min(this.allMoves.length, visible.length);
+    for (let overlap = maxOverlap; overlap >= 1; overlap--) {
+      const tail = this.allMoves.slice(this.allMoves.length - overlap);
+      const head = visible.slice(0, overlap);
+      if (tail.every((m, i) => m === head[i])) {
+        const newMoves = visible.slice(overlap);
+        if (newMoves.length > 0) {
+          this.allMoves = [...this.allMoves, ...newMoves];
+          log('Browser', `+${newMoves.length} move(s): ${newMoves.join(' ')}  total=${this.allMoves.length}`);
+        }
+        return this.allMoves;
+      }
+    }
+
+    // No overlap at all → new game or complete desync; reset
+    log('Browser', `Move list reset (no overlap). visible=[${visible.join(' ')}]`);
+    this.allMoves = [...visible];
+    return this.allMoves;
+  }
+
+  // Read DOM moves, reconcile with history, return full game move list.
+  async syncMoves(): Promise<string[]> {
+    const visible = await this.readMoves();
+    return this.reconcileMoves(visible);
+  }
+
   // Execute a UCI move (e.g. "e2e4", "e7e8q") on the board.
   // Returns true if the move registered (move count increased), false otherwise.
   async executeMove(uciMove: string, prevMoveCount: number): Promise<boolean> {
@@ -442,8 +485,8 @@ export class ChessDotCom {
     while (Date.now() < deadline) {
       if (await this.isGameOver()) throw new Error('GAME_OVER');
 
-      const moves = await this.readMoves();
-      log('Browser', `Move list (${moves.length}): ${moves.slice(-4).join(' ') || '(empty)'}`);
+      const moves = await this.syncMoves(); // reconciled full history
+      log('Browser', `Move list (${moves.length}): …${moves.slice(-4).join(' ') || '(empty)'}`);
 
       if (moves.length !== lastSeenCount) {
         lastSeenCount = moves.length;

@@ -62,7 +62,7 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     // -----------------------------------------------------------------------
     // Read position — prefer FEN (authoritative), fall back to SAN→UCI
     // -----------------------------------------------------------------------
-    const sanMoves = await browser.readMoves();
+    const sanMoves = await browser.syncMoves();
     let fen = await browser.readFen();
 
     if (fen) {
@@ -114,7 +114,7 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
       log('Main', `${bestMove} failed to register — re-asking engine`);
       try {
         const freshFen = await browser.readFen() ?? fen;
-        const freshSan = await browser.readMoves();
+        const freshSan = await browser.syncMoves();
         bestMove = await engine.bestMove(freshFen, MOVE_TIME_MS);
         log('Main', `Retry move: ${bestMove}`);
         await humanDelay();
