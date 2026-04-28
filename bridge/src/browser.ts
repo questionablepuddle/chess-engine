@@ -2,7 +2,7 @@ import { webkit, Browser, BrowserContext, Page } from 'playwright';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { squareToClass, sleep, humanDelay, randomBetween, log } from './utils';
+import { sleep, humanDelay, randomBetween, log } from './utils';
 
 const COOKIES_PATH = path.join(os.homedir(), '.chess-bot-profile', 'cookies.json');
 
@@ -381,11 +381,29 @@ export class ChessDotCom {
   // Throws 'GAME_OVER' if the game ends while waiting.
   async waitForOurTurn(expectedMoveCount: number, timeoutMs = 120_000): Promise<number> {
     const deadline = Date.now() + timeoutMs;
+    const STUCK_MS = 30_000;
+    let lastSeenCount = -1;
+    let lastChangeAt = Date.now();
+
     while (Date.now() < deadline) {
       if (await this.isGameOver()) throw new Error('GAME_OVER');
+
       const moves = await this.readMoves();
+      log('Browser', `Move list (${moves.length}): ${moves.slice(-4).join(' ') || '(empty)'}`);
+
+      if (moves.length !== lastSeenCount) {
+        lastSeenCount = moves.length;
+        lastChangeAt = Date.now();
+      }
+
       if (moves.length >= expectedMoveCount) return moves.length;
-      await sleep(200);
+
+      if (Date.now() - lastChangeAt > STUCK_MS) {
+        await this.page.screenshot({ path: '/tmp/debug-stuck.png' });
+        throw new Error(`Move list stuck at ${moves.length} for 30s — screenshot at /tmp/debug-stuck.png`);
+      }
+
+      await sleep(500);
     }
     throw new Error(`waitForOurTurn timed out after ${timeoutMs}ms`);
   }
@@ -435,28 +453,29 @@ export class ChessDotCom {
   }
 
   private async clickSquare(sq: string): Promise<void> {
-    const cls = squareToClass(sq); // e.g. "square-54"
+    // chess.com class: square-{file}{rank}, a=1..h=8, rank 1-8
+    const file = sq.charCodeAt(0) - 'a'.charCodeAt(0) + 1;
+    const rank = parseInt(sq[1], 10);
+    const squareClass = `.square-${file}${rank}`;
 
-    for (const sel of SEL.square(cls)) {
-      try {
-        const loc = this.page.locator(sel).first();
-        const count = await loc.count();
-        if (count === 0) continue;
+    log('Browser', `Clicking ${sq} → ${squareClass}`);
 
-        const box = await loc.boundingBox();
-        if (!box) continue;
-
-        // Move mouse to a slightly random position within the square
+    try {
+      const loc = this.page.locator(squareClass).first();
+      const box = await loc.boundingBox({ timeout: 3_000 });
+      if (box) {
         const x = box.x + box.width * 0.5 + randomBetween(-3, 3);
         const y = box.y + box.height * 0.5 + randomBetween(-3, 3);
         await this.page.mouse.move(x, y, { steps: Math.ceil(randomBetween(3, 8)) });
         await sleep(40 + randomBetween(20, 60));
         await this.page.mouse.click(x, y);
         return;
-      } catch {}
+      }
+    } catch (e) {
+      log('Browser', `${squareClass} not found via CSS class — falling back to coordinates: ${e}`);
     }
 
-    // Last resort: use coordinates from board bounding box + calculated offset
+    // Fallback: calculate from board bounding box
     await this.clickSquareByCoordinates(sq);
   }
 
