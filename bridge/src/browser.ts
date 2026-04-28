@@ -71,13 +71,7 @@ const SEL = {
     'button:has-text("Rematch")',
   ],
 
-  // Bot selection on /play/computer
-  botCard: (name: string) => [
-    `[class*="bot-card"]:has-text("${name}")`,
-    `[class*="bot-name"]:has-text("${name}")`,
-    `[class*="card"]:has-text("${name}")`,
-    `text="${name}"`,
-  ],
+  // Play button in the right panel after selecting a bot
   playButton: [
     'button[class*="play"]:visible',
     'button:has-text("Play"):visible',
@@ -202,7 +196,6 @@ export class ChessDotCom {
   // ---------------------------------------------------------------------------
 
   async startGameVsBot(): Promise<void> {
-    const botName = process.env.BOT_NAME ?? 'Martin';
 
     // Reload the page in case we're returning for a second game
     if (!this.page.url().includes('/play/computer')) {
@@ -214,22 +207,20 @@ export class ChessDotCom {
     await sleep(2000);
     await this.dismissPopups();
 
-    log('Browser', `Selecting bot: ${botName}`);
+    log('Browser', 'Expanding Beginner category…');
 
-    // --- Expand the "Beginner" category so bot cards become visible ---
-    // chess.com groups bots: The Circus / Beginner / Intermediate / Advanced / Master / Adaptive
-    const categoryLabel = 'Beginner';
+    // --- Expand the "Beginner" category ---
     const categorySelectors = [
-      `[class*="bot-group"]:has-text("${categoryLabel}")`,
-      `[class*="category"]:has-text("${categoryLabel}")`,
-      `[class*="section-header"]:has-text("${categoryLabel}")`,
-      `[class*="group-header"]:has-text("${categoryLabel}")`,
-      `[class*="accordion"]:has-text("${categoryLabel}")`,
-      `button:has-text("${categoryLabel}")`,
-      `h2:has-text("${categoryLabel}")`,
-      `h3:has-text("${categoryLabel}")`,
-      `[class*="header"]:has-text("${categoryLabel}")`,
-      `[class*="title"]:has-text("${categoryLabel}")`,
+      `[class*="bot-group"]:has-text("Beginner")`,
+      `[class*="category"]:has-text("Beginner")`,
+      `[class*="section-header"]:has-text("Beginner")`,
+      `[class*="group-header"]:has-text("Beginner")`,
+      `[class*="accordion"]:has-text("Beginner")`,
+      `button:has-text("Beginner")`,
+      `h2:has-text("Beginner")`,
+      `h3:has-text("Beginner")`,
+      `[class*="header"]:has-text("Beginner")`,
+      `[class*="title"]:has-text("Beginner")`,
     ];
 
     for (const sel of categorySelectors) {
@@ -238,34 +229,70 @@ export class ChessDotCom {
         if (await el.isVisible({ timeout: 1_500 })) {
           await this.humanClick(el);
           log('Browser', `Clicked category header: ${sel}`);
-          await sleep(800);
           break;
         }
       } catch {}
     }
 
-    // Scroll down in case the category is below the fold
-    await this.page.evaluate(() => window.scrollBy(0, 300));
-    await sleep(400);
+    // Wait for cards to render
+    await sleep(2_000);
 
-    // --- Find the bot card ---
-    const botEl = await this.firstVisible(SEL.botCard(botName), 8_000);
+    // --- Click the first bot card in the Beginner section ---
+    // Bot names only appear as hover tooltips — select by position, not text
+    const cardSelectors = [
+      '[class*="bot-card"]',
+      '[class*="bot-avatar"]',
+      '[class*="bot-item"]',
+      '[class*="computer-card"]',
+      '[class*="bot-list"] [class*="card"]',
+      '[class*="bot-list"] li',
+      '[class*="bots-list"] li',
+    ];
 
-    if (!botEl) {
-      await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
-      throw new Error(
-        `Bot "${botName}" not found on /play/computer. ` +
-        `Screenshot saved to /tmp/debug-bot-select.png. ` +
-        `Update SEL.botCard or categoryLabel if the DOM changed.`,
-      );
+    let clicked = false;
+    for (const sel of cardSelectors) {
+      try {
+        const cards = this.page.locator(sel);
+        const count = await cards.count();
+        if (count > 0) {
+          await this.humanClick(cards.first());
+          log('Browser', `Clicked first bot card (${count} found) via: ${sel}`);
+          clicked = true;
+          break;
+        }
+      } catch {}
     }
 
-    await this.humanClick(botEl);
+    if (!clicked) {
+      await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
+      throw new Error('Could not find any bot cards — screenshot at /tmp/debug-bot-select.png');
+    }
+
     await sleep(1_000);
 
-    // Screenshot to confirm bot is selected (name should appear in right-panel header)
+    // --- Read selected bot name from right panel ---
+    const selectedName = await this.page.evaluate(() => {
+      const selectors = [
+        '[class*="bot-name"]',
+        '[class*="computer-name"]',
+        '[class*="panel"] h2',
+        '[class*="panel"] h3',
+        '[class*="sidebar"] h2',
+        '[class*="sidebar"] h3',
+        '[class*="details"] h2',
+        '[class*="opponent-name"]',
+      ];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        const text = el?.textContent?.trim();
+        if (text) return text;
+      }
+      return '(unknown)';
+    });
+    log('Browser', `Selected bot: ${selectedName}`);
+
     await this.page.screenshot({ path: '/tmp/debug-bot-selected.png' });
-    log('Browser', `Bot clicked — verify selection at /tmp/debug-bot-selected.png`);
+    log('Browser', 'Bot selection screenshot: /tmp/debug-bot-selected.png');
 
     // --- Click the green Play button ---
     const playBtn = await this.firstVisible(SEL.playButton, 6_000);
@@ -278,6 +305,10 @@ export class ChessDotCom {
 
     // --- Wait for the board to become interactive ---
     await this.waitForBoard();
+
+    // Screenshot to confirm board loaded
+    await this.page.screenshot({ path: '/tmp/debug-game-start.png' });
+    log('Browser', 'Game start screenshot: /tmp/debug-game-start.png');
 
     // --- Detect our colour ---
     this.ourColor = await this.detectColor();
