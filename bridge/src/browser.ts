@@ -360,6 +360,117 @@ export class ChessDotCom {
     return null;
   }
 
+  // Read the current board position by inspecting rendered piece elements.
+  // Returns a full FEN string, or null if the pieces can't be found in the DOM.
+  // moveCount is the number of half-moves played so far (even = white to move).
+  async readBoardFen(moveCount: number): Promise<string | null> {
+    const fen = await this.page.evaluate((mc: number) => {
+      const PIECE_MAP: Record<string, string> = {
+        wp: 'P', wn: 'N', wb: 'B', wr: 'R', wq: 'Q', wk: 'K',
+        bp: 'p', bn: 'n', bb: 'b', br: 'r', bq: 'q', bk: 'k',
+      };
+
+      // Find all piece elements, trying light DOM then shadow root.
+      function collectPieces(): Element[] {
+        // Inside the chess-board host element (light DOM children)
+        const host = document.querySelector('chess-board');
+        if (host) {
+          const inHost = Array.from(host.querySelectorAll('[class*="piece"]'));
+          if (inHost.length >= 2) return inHost;
+          // Shadow root
+          const sr = (host as any).shadowRoot as ShadowRoot | null;
+          if (sr) {
+            const inShadow = Array.from(sr.querySelectorAll('[class*="piece"]'));
+            if (inShadow.length >= 2) return inShadow;
+          }
+        }
+        // Fallback: anywhere on the page that looks like a chess piece class
+        return Array.from(document.querySelectorAll('[class*="piece"]'))
+          .filter(el => /\b[wb][pnbrqk]\b/.test(
+            typeof el.className === 'string' ? el.className : '',
+          ));
+      }
+
+      const els = collectPieces();
+      if (els.length < 2) return { fen: null, debug: `only ${els.length} piece elements found` };
+
+      // Parse each element into a board map  square → piece char
+      const boardMap: Record<string, string> = {};
+      let skipped = 0;
+
+      for (const el of els) {
+        const cls = typeof el.className === 'string' ? el.className : '';
+
+        // Piece type: first matching two-char code
+        let pieceChar: string | undefined;
+        for (const code of Object.keys(PIECE_MAP)) {
+          if (new RegExp(`\\b${code}\\b`).test(cls)) {
+            pieceChar = PIECE_MAP[code];
+            break;
+          }
+        }
+        if (!pieceChar) { skipped++; continue; }
+
+        // Square: "square-XY"  X=file 1-8 (a-h), Y=rank 1-8
+        const m = cls.match(/\bsquare-([1-8])([1-8])\b/);
+        if (!m) { skipped++; continue; }
+
+        const sq = String.fromCharCode('a'.charCodeAt(0) + parseInt(m[1]) - 1) + m[2];
+        boardMap[sq] = pieceChar;
+      }
+
+      // Sanity: must see both kings
+      if (!Object.values(boardMap).includes('K') || !Object.values(boardMap).includes('k')) {
+        return { fen: null, debug: `kings missing from boardMap (${Object.keys(boardMap).length} squares parsed, ${skipped} skipped)` };
+      }
+
+      // Build piece-placement string rank 8 → 1
+      let placement = '';
+      for (let rank = 8; rank >= 1; rank--) {
+        let empty = 0;
+        for (let file = 1; file <= 8; file++) {
+          const sq = String.fromCharCode('a'.charCodeAt(0) + file - 1) + rank;
+          const piece = boardMap[sq];
+          if (piece) {
+            if (empty) { placement += empty; empty = 0; }
+            placement += piece;
+          } else {
+            empty++;
+          }
+        }
+        if (empty) placement += empty;
+        if (rank > 1) placement += '/';
+      }
+
+      // Active color: even half-moves = white to play
+      const activeColor = mc % 2 === 0 ? 'w' : 'b';
+
+      // Castling: available if king and rook are still on their starting squares
+      let castling = '';
+      if (boardMap['e1'] === 'K') {
+        if (boardMap['h1'] === 'R') castling += 'K';
+        if (boardMap['a1'] === 'R') castling += 'Q';
+      }
+      if (boardMap['e8'] === 'k') {
+        if (boardMap['h8'] === 'r') castling += 'k';
+        if (boardMap['a8'] === 'r') castling += 'q';
+      }
+
+      const fullMove = Math.floor(mc / 2) + 1;
+      return {
+        fen: `${placement} ${activeColor} ${castling || '-'} - 0 ${fullMove}`,
+        debug: `${Object.keys(boardMap).length} pieces, ${skipped} skipped`,
+      };
+    }, moveCount);
+
+    if (!fen || !fen.fen) {
+      log('Browser', `readBoardFen failed: ${(fen as any)?.debug ?? 'null result'}`);
+      return null;
+    }
+    log('Browser', `Board FEN [${(fen as any).debug}]: ${fen.fen}`);
+    return fen.fen;
+  }
+
   // Returns ALL SAN move strings from the move list (including scrolled-out moves).
   async readMoves(): Promise<string[]> {
     const moves = await this.page.evaluate(() => {
