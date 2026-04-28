@@ -47,13 +47,14 @@ export class UCIEngine {
     log('Engine', 'New game ready');
   }
 
-  // Ask for the best move given a list of UCI moves (may be empty for startpos).
-  async bestMove(uciMoves: string[], moveTimeMs = 1_000): Promise<string> {
-    const pos = uciMoves.length
-      ? `position startpos moves ${uciMoves.join(' ')}`
-      : 'position startpos';
-
-    this.write(pos);
+  // Ask for the best move given a FEN string (or "startpos moves ..." fallback).
+  async bestMove(fen: string, moveTimeMs = 1_000): Promise<string> {
+    // If the caller passed a startpos fallback string, use it directly;
+    // otherwise wrap in "position fen ..."
+    const posCmd = fen.startsWith('startpos')
+      ? `position ${fen}`
+      : `position fen ${fen}`;
+    this.write(posCmd);
     const lines = await this.cmd(
       `go movetime ${moveTimeMs}`,
       'bestmove',
@@ -66,7 +67,7 @@ export class UCIEngine {
     const move = line.split(' ')[1];
     if (!move || move === '(none)') throw new Error('Engine returned (none)');
 
-    log('Engine', `bestmove ${move}`);
+    log('Engine', `bestmove ${move}  (fen: ${fen})`);
     return move;
   }
 

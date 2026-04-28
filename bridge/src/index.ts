@@ -2,7 +2,7 @@ import 'dotenv/config';
 import * as path from 'path';
 import { UCIEngine } from './engine';
 import { ChessDotCom } from './browser';
-import { sanMovesToUci, getLegalUciMoves, sleep, humanDelay, log } from './utils';
+import { getLegalUciMoves, sanMovesToUci, sleep, humanDelay, log } from './utils';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -60,48 +60,49 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     }
 
     // -----------------------------------------------------------------------
-    // Read the full move list and convert to UCI
+    // Read position — prefer FEN (authoritative), fall back to SAN→UCI
     // -----------------------------------------------------------------------
     const sanMoves = await browser.readMoves();
-    const uciMoves = sanMovesToUci(sanMoves);
+    let fen = await browser.readFen();
 
-    log('Main', `Move count: ${sanMoves.length}  UCI list: ${uciMoves.join(' ') || '(none)'}`);
-
-    if (uciMoves.length !== sanMoves.length) {
-      await browser.page.screenshot({ path: '/tmp/debug-conv-error.png' });
-      log('Main', 'ERROR: SAN→UCI conversion incomplete — screenshot at /tmp/debug-conv-error.png');
-      break;
+    if (fen) {
+      log('Main', `Position from FEN (${sanMoves.length} moves on board)`);
+    } else {
+      // FEN unavailable — fall back to SAN→UCI conversion
+      const uciMoves = sanMovesToUci(sanMoves);
+      log('Main', `FEN unavailable — using SAN→UCI (${uciMoves.length}/${sanMoves.length} moves)`);
+      // Synthesise a FEN from the move list so the engine interface stays uniform
+      fen = uciMoves.length
+        ? `startpos moves ${uciMoves.join(' ')}`  // engine will receive "position startpos moves ..."
+        : 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
     }
+
+    // -----------------------------------------------------------------------
+    // Pre-move legality check (uses SAN→UCI path regardless)
+    // -----------------------------------------------------------------------
+    const legalMoves = getLegalUciMoves(sanMoves);
 
     // -----------------------------------------------------------------------
     // Ask engine for best move
     // -----------------------------------------------------------------------
     let bestMove: string;
     try {
-      bestMove = await engine.bestMove(uciMoves, MOVE_TIME_MS);
+      bestMove = await engine.bestMove(fen, MOVE_TIME_MS);
     } catch (err) {
       log('Main', `Engine error: ${err} — restarting engine`);
       await engine.restart();
-      bestMove = await engine.bestMove(uciMoves, MOVE_TIME_MS);
+      bestMove = await engine.bestMove(fen, MOVE_TIME_MS);
     }
 
-    // -----------------------------------------------------------------------
-    // Pre-click legality check
-    // -----------------------------------------------------------------------
-    const legalMoves = getLegalUciMoves(sanMoves);
     if (!legalMoves.includes(bestMove)) {
-      log('Main', `WARNING: engine move ${bestMove} not in legal move list`);
-      log('Main', `Legal moves: ${legalMoves.slice(0, 15).join(' ')}`);
+      log('Main', `WARNING: engine move ${bestMove} not in legal list: ${legalMoves.slice(0, 15).join(' ')}`);
     }
 
     // -----------------------------------------------------------------------
-    // Human-like delay before playing
+    // Human-like delay then execute
     // -----------------------------------------------------------------------
     await humanDelay();
 
-    // -----------------------------------------------------------------------
-    // Execute move — if it doesn't register, re-ask the engine once
-    // -----------------------------------------------------------------------
     let registered = false;
     try {
       registered = await browser.executeMove(bestMove, sanMoves.length);
@@ -110,16 +111,16 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     }
 
     if (!registered) {
-      log('Main', `${bestMove} failed to register — re-asking engine for new move`);
+      log('Main', `${bestMove} failed to register — re-asking engine`);
       try {
-        const freshMoves = await browser.readMoves();
-        const freshUci = sanMovesToUci(freshMoves);
-        bestMove = await engine.bestMove(freshUci, MOVE_TIME_MS);
-        log('Main', `Retrying with engine move: ${bestMove}`);
+        const freshFen = await browser.readFen() ?? fen;
+        const freshSan = await browser.readMoves();
+        bestMove = await engine.bestMove(freshFen, MOVE_TIME_MS);
+        log('Main', `Retry move: ${bestMove}`);
         await humanDelay();
-        await browser.executeMove(bestMove, freshMoves.length);
+        await browser.executeMove(bestMove, freshSan.length);
       } catch (err) {
-        log('Main', `Retry also failed: ${err} — continuing to next poll`);
+        log('Main', `Retry failed: ${err} — continuing`);
       }
     }
 

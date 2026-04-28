@@ -195,7 +195,14 @@ export class ChessDotCom {
   // ---------------------------------------------------------------------------
 
   async startGameVsBot(): Promise<void> {
+    // chess.com is a SPA — goto() on the same URL doesn't re-render the React
+    // app on game 2+. Navigate away first then back to force a fresh load.
     log('Browser', 'Navigating to chess.com/play/computer…');
+    await this.page.goto('https://www.chess.com/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+    await sleep(1_000);
     await this.page.goto('https://www.chess.com/play/computer', {
       waitUntil: 'domcontentloaded',
       timeout: 30_000,
@@ -203,7 +210,10 @@ export class ChessDotCom {
     await this.page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {
       log('Browser', 'networkidle timeout — continuing anyway');
     });
-    await sleep(2_000);
+    // Wait for the bot panel to appear before interacting
+    await this.page.waitForSelector('[class*="bot"], [class*="computer"]', { timeout: 10_000 })
+      .catch(() => log('Browser', 'Bot panel selector not found — continuing anyway'));
+    await sleep(5_000);
     await this.dismissPopups();
 
     // --- Expand Beginner section if not already open ---
@@ -301,6 +311,23 @@ export class ChessDotCom {
   // ---------------------------------------------------------------------------
   // Board interaction
   // ---------------------------------------------------------------------------
+
+  // Read the current FEN from chess.com's board object or DOM attributes.
+  async readFen(): Promise<string | null> {
+    const fen = await this.page.evaluate(() => {
+      // Try the board web-component API first
+      const board = document.querySelector('chess-board') as any;
+      if (board?.game?.getFEN) return board.game.getFEN() as string;
+      if (board?.getFen)       return board.getFen() as string;
+      if (board?.fen)          return board.fen as string;
+      // Fallback: data attribute some chess.com versions expose
+      const attr = board?.getAttribute?.('fen');
+      if (attr) return attr;
+      return null;
+    });
+    if (fen) log('Browser', `FEN: ${fen}`);
+    return fen;
+  }
 
   // Returns all SAN move strings currently shown in the move list (both sides).
   async readMoves(): Promise<string[]> {
