@@ -1,9 +1,10 @@
-import { chromium, BrowserContext, Page } from 'playwright';
-import { execSync } from 'child_process';
+import { webkit, Browser, BrowserContext, Page } from 'playwright';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { squareToClass, sleep, humanDelay, randomBetween, log } from './utils';
+
+const COOKIES_PATH = path.join(os.homedir(), '.chess-bot-profile', 'cookies.json');
 
 // ---------------------------------------------------------------------------
 // Selector constants
@@ -91,6 +92,7 @@ const SEL = {
 // ---------------------------------------------------------------------------
 
 export class ChessDotCom {
+  private browser!: Browser;
   private context!: BrowserContext;
   page!: Page;
 
@@ -98,47 +100,31 @@ export class ChessDotCom {
   ourColor: 'white' | 'black' = 'white';
 
   // ---------------------------------------------------------------------------
-  // Initialisation — use real Chrome with the user's existing profile so
-  // chess.com sees a genuine browser (avoids Cloudflare bot detection).
+  // Initialisation — WebKit (Safari engine) with saved cookie persistence
   // ---------------------------------------------------------------------------
 
   async init(): Promise<void> {
-    const userDataDir =
-      process.env.CHROME_PROFILE ??
-      path.join(os.homedir(), '.chess-bot-profile');
+    log('Browser', 'Launching WebKit (Safari)…');
 
-    const isNewProfile = !fs.existsSync(path.join(userDataDir, 'Default'));
+    this.browser = await webkit.launch({ headless: false });
 
-    // Warn if Chrome is already running with this profile — it locks the directory
-    try {
-      execSync('pgrep -x "Google Chrome"', { stdio: 'ignore' });
-      console.warn(
-        '\nWARNING: Google Chrome appears to be running.\n' +
-        'Close Chrome before starting this script, or the profile\n' +
-        `directory may be locked: ${userDataDir}\n`,
-      );
-    } catch {
-      // pgrep exits non-zero when no match — Chrome is not running, good
-    }
-
-    log('Browser', `Launching Chrome with profile: ${userDataDir}`);
-
-    this.context = await chromium.launchPersistentContext(userDataDir, {
-      headless: false,
-      channel: 'chrome',
-      args: [
-        '--disable-blink-features=AutomationControlled',
-        '--no-first-run',
-        '--no-default-browser-check',
-      ],
-      ignoreDefaultArgs: ['--enable-automation'],
+    this.context = await this.browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+        'AppleWebKit/605.1.15 (KHTML, like Gecko) ' +
+        'Version/17.0 Safari/605.1.15',
     });
 
-    // Reuse the first page if Chrome opened one, otherwise open a new tab
-    const pages = this.context.pages();
-    this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
+    // Load saved cookies if they exist
+    if (fs.existsSync(COOKIES_PATH)) {
+      const saved = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
+      await this.context.addCookies(saved);
+      log('Browser', `Loaded ${saved.length} cookies from ${COOKIES_PATH}`);
+    }
 
-    log('Browser', `Navigating to chess.com…`);
+    this.page = await this.context.newPage();
+
+    log('Browser', 'Navigating to chess.com…');
     try {
       await this.page.goto('https://www.chess.com/', {
         waitUntil: 'domcontentloaded',
@@ -151,14 +137,14 @@ export class ChessDotCom {
       throw err;
     }
 
-    await this.ensureLoggedIn(isNewProfile);
+    await this.ensureLoggedIn();
   }
 
   // ---------------------------------------------------------------------------
-  // Login — manual flow using the persistent profile
+  // Login — manual flow with cookie save for subsequent runs
   // ---------------------------------------------------------------------------
 
-  private async ensureLoggedIn(isNewProfile: boolean): Promise<void> {
+  private async ensureLoggedIn(): Promise<void> {
     await sleep(1500);
 
     if (await this.isLoggedIn()) {
@@ -166,13 +152,9 @@ export class ChessDotCom {
       return;
     }
 
-    const firstRunMsg = isNewProfile
-      ? 'This is a fresh Chrome profile. Please log in to chess.com in the browser window,'
-      : 'Session expired. Please log in to chess.com in the browser window,';
-
     while (true) {
       console.log('\n========================================');
-      console.log(firstRunMsg);
+      console.log('Please log in to chess.com in the browser window,');
       console.log('then press ENTER in this terminal when done...');
       console.log('========================================\n');
 
@@ -182,7 +164,11 @@ export class ChessDotCom {
       await sleep(1500);
 
       if (await this.isLoggedIn()) {
-        log('Browser', 'Login confirmed — session will persist in profile');
+        log('Browser', 'Login confirmed — saving cookies');
+        const cookies = await this.context.cookies();
+        fs.mkdirSync(path.dirname(COOKIES_PATH), { recursive: true });
+        fs.writeFileSync(COOKIES_PATH, JSON.stringify(cookies, null, 2));
+        log('Browser', `Cookies saved to ${COOKIES_PATH}`);
         break;
       }
 
@@ -399,6 +385,7 @@ export class ChessDotCom {
 
   async close(): Promise<void> {
     await this.context?.close();
+    await this.browser?.close();
   }
 
   // ---------------------------------------------------------------------------
