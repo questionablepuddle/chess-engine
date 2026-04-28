@@ -153,26 +153,51 @@ export class ChessDotCom {
       return;
     }
 
-    // Not logged in — ask the user to do it manually in the browser window
-    console.log('\n========================================');
-    console.log('Please log in to chess.com in the browser window,');
-    console.log('then press ENTER to continue...');
-    console.log('========================================\n');
+    // Not logged in — loop until the user confirms login
+    while (true) {
+      console.log('\n========================================');
+      console.log('Please log in to chess.com in the browser window,');
+      console.log('then press ENTER in this terminal when done...');
+      console.log('========================================\n');
 
-    await new Promise<void>(resolve => process.stdin.once('data', () => resolve()));
+      await new Promise<void>(resolve => process.stdin.once('data', () => resolve()));
+
+      // Re-check — reload the page to get fresh DOM state
+      await this.page.reload({ waitUntil: 'domcontentloaded' });
+      await sleep(1500);
+
+      if (await this.isLoggedIn()) {
+        log('Browser', 'Login confirmed');
+        break;
+      }
+
+      console.log('Not logged in yet — please try again.');
+    }
 
     await this.context.storageState({ path: STORAGE_PATH });
     log('Browser', 'Session saved to storage.json');
   }
 
   private async isLoggedIn(): Promise<boolean> {
-    // chess.com shows a "Sign Up" or "Log In" link when the user is a guest
-    const guestLink = await this.page
-      .locator('a[href*="/register"], a[href*="/login"], button:has-text("Sign Up"), a:has-text("Sign Up")')
-      .first()
-      .isVisible({ timeout: 3_000 })
-      .catch(() => false);
-    return !guestLink;
+    // Look for elements that only exist when authenticated
+    const loggedInSelectors = [
+      '[data-user-username]',
+      '.user-username-component',
+      'a[href*="/member/"]',
+      '[class*="user-tagline-username"]',
+      '[class*="header-user-tagline"]',
+      'a[class*="user-tagline"]',
+    ];
+    for (const sel of loggedInSelectors) {
+      try {
+        const visible = await this.page.locator(sel).first().isVisible({ timeout: 2_000 });
+        if (visible) {
+          log('Browser', `Logged-in indicator found: ${sel}`);
+          return true;
+        }
+      } catch {}
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------------
