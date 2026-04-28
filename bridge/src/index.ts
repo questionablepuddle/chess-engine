@@ -1,8 +1,9 @@
 import 'dotenv/config';
 import * as path from 'path';
+import { Chess } from 'chess.js';
 import { UCIEngine } from './engine';
 import { ChessDotCom } from './browser';
-import { getLegalUciMovesFromFen, sleep, humanDelay, log } from './utils';
+import { sleep, humanDelay, log } from './utils';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -12,7 +13,7 @@ const ENGINE_PATH = process.env.ENGINE_PATH
   ? path.resolve(__dirname, '..', process.env.ENGINE_PATH)
   : path.resolve(__dirname, '../../engine/build/chess_engine');
 
-const MOVE_TIME_MS = 1_000; // engine think time per move
+const MOVE_TIME_MS = 1_000;
 const GAME_DELAY_MIN = 5_000;
 const GAME_DELAY_MAX = 10_000;
 
@@ -27,6 +28,12 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
   await browser.startGameVsBot();
 
   const ourColor = browser.ourColor;
+
+  // trackerChess is the single source of truth for position.
+  //   Our moves  → applied directly with exact UCI coordinates.
+  //   Opponent moves → detected via last-move highlight squares (light DOM).
+  const trackerChess = new Chess();
+  let knownPlyCount = 0; // half-moves already applied to trackerChess
 
   // White moves at 0, 2, 4 … (even); black at 1, 3, 5 … (odd).
   let expectedMoveCount = ourColor === 'white' ? 0 : 1;
@@ -47,26 +54,54 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     if (await browser.isGameOver()) { log('Main', 'Game over at top of loop'); break; }
 
     // -----------------------------------------------------------------------
-    // Read board state
+    // Sync move count — used for turn parity and executeMove check.
+    // The SAN content is never used.
     // -----------------------------------------------------------------------
-    // syncMoves() gives us the move COUNT only (for turn parity and
-    // executeMove registration detection). The SAN content is never used.
     const domSanMoves = await browser.syncMoves();
     const moveCount = domSanMoves.length;
 
-    // Read piece positions directly from rendered DOM elements — no SAN parsing.
-    const fen = await browser.readBoardAsFen(moveCount);
-    if (!fen) {
-      log('Main', 'Cannot read board FEN — skipping turn, retrying in 500 ms');
-      await sleep(500);
-      continue;
-    }
+    // -----------------------------------------------------------------------
+    // Sync opponent's move into trackerChess via highlight detection
+    // -----------------------------------------------------------------------
+    if (knownPlyCount < moveCount) {
+      const highlighted = await browser.readHighlightedSquares();
+      const legal = trackerChess.moves({ verbose: true });
+      let applied = false;
 
-    const legalMoves = getLegalUciMovesFromFen(fen);
+      // Try every pair of highlighted squares — one of them should be the
+      // opponent's from/to.  We test both orderings and all promotions.
+      outer: for (let i = 0; i < highlighted.length && !applied; i++) {
+        for (let j = i + 1; j < highlighted.length && !applied; j++) {
+          const sq1 = highlighted[i];
+          const sq2 = highlighted[j];
+          const candidates = legal.filter(m =>
+            (m.from === sq1 && m.to === sq2) || (m.from === sq2 && m.to === sq1),
+          );
+          if (candidates.length === 0) continue;
+
+          // Non-promotion moves first; fall back to queen promotion.
+          const move = candidates.find(m => !m.promotion)
+                    ?? candidates.find(m => m.promotion === 'q')
+                    ?? candidates[0];
+          trackerChess.move({ from: move.from, to: move.to, ...(move.promotion ? { promotion: move.promotion } : {}) });
+          knownPlyCount++;
+          log('Main', `Opponent: ${move.from}${move.to}${move.promotion ?? ''}  [ply ${knownPlyCount}]`);
+          applied = true;
+        }
+      }
+
+      if (!applied) {
+        log('Main', `WARN: could not determine opponent move from highlights [${highlighted.join(', ')}] — position may drift`);
+      }
+    }
 
     // -----------------------------------------------------------------------
     // Ask engine for best move
     // -----------------------------------------------------------------------
+    const fen = trackerChess.fen();
+    const legalMoves = trackerChess.moves({ verbose: true })
+      .map(m => `${m.from}${m.to}${m.promotion ?? ''}`);
+
     let bestMove: string;
     try {
       bestMove = await engine.bestMove(fen, MOVE_TIME_MS);
@@ -97,7 +132,6 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
       failedMoves.add(finalMove);
 
       if (attempt < 2) {
-        // Re-ask engine; if it returns a previously-failed move, pick a random legal one
         let nextMove = '';
         try { nextMove = await engine.bestMove(fen, MOVE_TIME_MS); } catch {}
 
@@ -116,7 +150,19 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
       break;
     }
 
-    log('Main', `Played: ${finalMove}  [after move ${moveCount}]`);
+    // -----------------------------------------------------------------------
+    // Move registered — apply to trackerChess
+    // -----------------------------------------------------------------------
+    const from  = finalMove.slice(0, 2);
+    const to    = finalMove.slice(2, 4);
+    const promo = finalMove.length === 5 ? finalMove[4] : undefined;
+    try {
+      trackerChess.move({ from, to, ...(promo ? { promotion: promo } : {}) });
+      knownPlyCount++;
+      log('Main', `Our move: ${finalMove}  [ply ${knownPlyCount}]`);
+    } catch (err) {
+      log('Main', `WARN: could not apply our move to trackerChess: ${err}`);
+    }
 
     // Our move (+1) + opponent's reply (+1)
     expectedMoveCount = moveCount + 2;

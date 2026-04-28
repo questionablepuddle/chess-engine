@@ -363,61 +363,26 @@ export class ChessDotCom {
     return null;
   }
 
-  async readBoardAsFen(moveCount: number): Promise<string | null> {
+  // Returns the algebraic names of all highlighted squares (e.g. ["e2","e4"]).
+  // Chess.com marks the last-move origin and target with a "highlight" CSS class.
+  // These elements live in the light DOM, so they are always reachable.
+  async readHighlightedSquares(): Promise<string[]> {
     try {
-      // Use Playwright locator to pierce shadow DOM
-      const pieces = await this.page.locator('chess-board >> [class*="piece"]').all();
-
-      if (pieces.length < 2) return null;
-
-      const grid: string[][] = Array(8).fill(null).map(() => Array(8).fill(''));
-      const pieceMap: Record<string, string> = {
-        'wp': 'P', 'wr': 'R', 'wn': 'N', 'wb': 'B', 'wq': 'Q', 'wk': 'K',
-        'bp': 'p', 'br': 'r', 'bn': 'n', 'bb': 'b', 'bq': 'q', 'bk': 'k',
-      };
-
-      let whiteKing = false, blackKing = false;
-
-      for (const piece of pieces) {
-        const className = await piece.getAttribute('class') || '';
-        const classes = className.split(' ');
-
-        const pieceClass = classes.find(c => pieceMap[c]);
-        if (!pieceClass) continue;
-        const pieceChar = pieceMap[pieceClass];
-
-        const squareClass = classes.find(c => /^square-\d\d$/.test(c));
-        if (!squareClass) continue;
-        const file = parseInt(squareClass[7]) - 1;
-        const rank = parseInt(squareClass[8]) - 1;
-
-        grid[7 - rank][file] = pieceChar;
-        if (pieceChar === 'K') whiteKing = true;
-        if (pieceChar === 'k') blackKing = true;
-      }
-
-      if (!whiteKing || !blackKing) {
-        log('Browser', `readBoardAsFen: missing king, pieces found: ${pieces.length}`);
-        return null;
-      }
-
-      const rows = grid.map(row => {
-        let fen = '', empty = 0;
-        for (const cell of row) {
-          if (!cell) { empty++; }
-          else { if (empty) { fen += empty; empty = 0; } fen += cell; }
+      const els = await this.page.locator('[class*="highlight"]').all();
+      const squares: string[] = [];
+      for (const el of els) {
+        const cls = await el.getAttribute('class') || '';
+        const m = cls.match(/\bsquare-([1-8])([1-8])\b/);
+        if (m) {
+          const sq = String.fromCharCode('a'.charCodeAt(0) + parseInt(m[1]) - 1) + m[2];
+          if (!squares.includes(sq)) squares.push(sq);
         }
-        if (empty) fen += empty;
-        return fen;
-      });
-
-      const activeColor = moveCount % 2 === 0 ? 'w' : 'b';
-      const fen = rows.join('/') + ' ' + activeColor + ' KQkq - 0 1';
-      log('Browser', `Board FEN: ${fen}`);
-      return fen;
+      }
+      log('Browser', `Highlights: [${squares.join(', ')}]`);
+      return squares;
     } catch (e) {
-      log('Browser', `readBoardAsFen error: ${e}`);
-      return null;
+      log('Browser', `readHighlightedSquares error: ${e}`);
+      return [];
     }
   }
 
