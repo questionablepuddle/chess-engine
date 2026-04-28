@@ -55,7 +55,7 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     const moveCount = domSanMoves.length;
 
     // Read piece positions directly from rendered DOM elements — no SAN parsing.
-    const fen = await browser.readBoardAsFen(ourColor === 'white', moveCount);
+    const fen = await browser.readBoardAsFen(moveCount);
     if (!fen) {
       log('Main', 'Cannot read board FEN — skipping turn, retrying in 500 ms');
       await sleep(500);

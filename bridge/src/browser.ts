@@ -363,20 +363,14 @@ export class ChessDotCom {
     return null;
   }
 
-  async readBoardAsFen(weAreWhite: boolean, moveCount: number): Promise<string | null> {
-    const fen = await this.page.evaluate(({ weAreWhite, moveCount }) => {
-      // Try light DOM first, then shadow root
-      const board = document.querySelector('chess-board');
-      if (!board) return null;
-
-      const root = (board as any).shadowRoot || board;
-      const pieces = Array.from(root.querySelectorAll('[class*="piece"]'));
+  async readBoardAsFen(moveCount: number): Promise<string | null> {
+    try {
+      // Use Playwright locator to pierce shadow DOM
+      const pieces = await this.page.locator('chess-board >> [class*="piece"]').all();
 
       if (pieces.length < 2) return null;
 
-      // 8x8 grid, index [rank][file], rank 8 = index 0
       const grid: string[][] = Array(8).fill(null).map(() => Array(8).fill(''));
-
       const pieceMap: Record<string, string> = {
         'wp': 'P', 'wr': 'R', 'wn': 'N', 'wb': 'B', 'wq': 'Q', 'wk': 'K',
         'bp': 'p', 'br': 'r', 'bn': 'n', 'bb': 'b', 'bq': 'q', 'bk': 'k',
@@ -384,32 +378,33 @@ export class ChessDotCom {
 
       let whiteKing = false, blackKing = false;
 
-      for (const el of pieces) {
-        const classes = (el as Element).className.split(' ');
+      for (const piece of pieces) {
+        const className = await piece.getAttribute('class') || '';
+        const classes = className.split(' ');
 
-        // Find piece type
-        const pieceClass = classes.find((c: string) => pieceMap[c]);
+        const pieceClass = classes.find(c => pieceMap[c]);
         if (!pieceClass) continue;
-        const piece = pieceMap[pieceClass];
+        const pieceChar = pieceMap[pieceClass];
 
-        // Find square
-        const squareClass = classes.find((c: string) => /^square-\d\d$/.test(c));
+        const squareClass = classes.find(c => /^square-\d\d$/.test(c));
         if (!squareClass) continue;
-        const file = parseInt(squareClass[7]) - 1; // 0-7
-        const rank = parseInt(squareClass[8]) - 1; // 0-7
+        const file = parseInt(squareClass[7]) - 1;
+        const rank = parseInt(squareClass[8]) - 1;
 
-        grid[7 - rank][file] = piece;
-        if (piece === 'K') whiteKing = true;
-        if (piece === 'k') blackKing = true;
+        grid[7 - rank][file] = pieceChar;
+        if (pieceChar === 'K') whiteKing = true;
+        if (pieceChar === 'k') blackKing = true;
       }
 
-      if (!whiteKing || !blackKing) return null;
+      if (!whiteKing || !blackKing) {
+        log('Browser', `readBoardAsFen: missing king, pieces found: ${pieces.length}`);
+        return null;
+      }
 
-      // Build FEN placement string
-      const rows = grid.map((row: string[]) => {
+      const rows = grid.map(row => {
         let fen = '', empty = 0;
         for (const cell of row) {
-          if (cell === '') { empty++; }
+          if (!cell) { empty++; }
           else { if (empty) { fen += empty; empty = 0; } fen += cell; }
         }
         if (empty) fen += empty;
@@ -417,12 +412,13 @@ export class ChessDotCom {
       });
 
       const activeColor = moveCount % 2 === 0 ? 'w' : 'b';
-      return rows.join('/') + ' ' + activeColor + ' KQkq - 0 1';
-    }, { weAreWhite, moveCount });
-
-    if (fen) log('Browser', `Board FEN (move ${moveCount}): ${fen}`);
-    else     log('Browser', `readBoardAsFen returned null (move ${moveCount})`);
-    return fen;
+      const fen = rows.join('/') + ' ' + activeColor + ' KQkq - 0 1';
+      log('Browser', `Board FEN: ${fen}`);
+      return fen;
+    } catch (e) {
+      log('Browser', `readBoardAsFen error: ${e}`);
+      return null;
+    }
   }
 
   // Returns ALL SAN move strings from the move list (including scrolled-out moves).
