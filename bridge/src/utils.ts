@@ -30,17 +30,34 @@ export function sanMovesToUci(sanMoves: string[]): string[] {
   const uci: string[] = [];
 
   for (const san of sanMoves) {
-    try {
-      const m = chess.move(san);
-      // promotion is already lowercase ('q','r','b','n') which is what UCI wants
+    // Attempt 1: pass the SAN to chess.js as-is (handles exd5, Nxd5, etc.)
+    let m = tryMove(chess, san);
+
+    // Attempt 2: "xd5" → missing from-file; try every legal move that lands
+    // on the target square and involves a capture, pick the first that parses.
+    if (!m && /^x[a-h][1-8]/.test(san)) {
+      const target = san.slice(1, 3); // e.g. "d5"
+      const legal = chess.moves({ verbose: true });
+      const candidate = legal.find(mv => mv.to === target && mv.captured);
+      if (candidate) m = tryMove(chess, candidate.san);
+    }
+
+    if (m) {
       uci.push(m.from + m.to + (m.promotion ?? ''));
-    } catch {
-      console.error(`[utils] Cannot parse SAN "${san}" — stopping conversion`);
-      break;
+    } else {
+      console.warn(`[utils] Cannot parse SAN "${san}" — skipping (position may drift)`);
     }
   }
 
   return uci;
+}
+
+function tryMove(chess: Chess, san: string) {
+  try {
+    return chess.move(san);
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

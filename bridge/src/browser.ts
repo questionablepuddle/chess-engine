@@ -200,6 +200,9 @@ export class ChessDotCom {
       waitUntil: 'domcontentloaded',
       timeout: 30_000,
     });
+    await this.page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {
+      log('Browser', 'networkidle timeout — continuing anyway');
+    });
     await sleep(2_000);
     await this.dismissPopups();
 
@@ -210,7 +213,7 @@ export class ChessDotCom {
       if (await header.isVisible({ timeout: 5_000 })) {
         await this.humanClick(header);
         log('Browser', 'Clicked Beginner header');
-        await sleep(2_000);
+        await sleep(3_000);
       }
     } catch (e) {
       log('Browser', `Beginner header not found or already expanded: ${e}`);
