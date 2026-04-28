@@ -153,30 +153,27 @@ export class ChessDotCom {
     const username = process.env.CHESSDOTCOM_USERNAME!;
     const password = process.env.CHESSDOTCOM_PASSWORD!;
 
-    // If we already have a session cookie, verify it before going through login
-    await this.page.goto('https://www.chess.com/', { waitUntil: 'domcontentloaded' });
-    await sleep(1500);
-
-    const url = this.page.url();
-    if (!url.includes('/login') && !url.includes('/register')) {
-      log('Browser', 'Already logged in (session cookie valid)');
-      return;
+    // Always start fresh — delete stale session so we don't silently skip login
+    if (fs.existsSync(STORAGE_PATH)) {
+      fs.unlinkSync(STORAGE_PATH);
+      log('Browser', 'Deleted stale storage.json');
     }
 
     log('Browser', `Logging in as ${username}…`);
     await this.page.goto('https://www.chess.com/login', { waitUntil: 'domcontentloaded' });
-    await sleep(1000);
-
+    await sleep(1500);
     await this.dismissPopups();
 
-    // Fill username
-    const userField = await this.firstVisible(SEL.loginUsername);
+    // Wait for and fill username
+    const userField = await this.firstVisible(SEL.loginUsername, 10_000);
     if (!userField) throw new Error('Cannot find username field on login page');
     await userField.click();
     await this.typeHuman(username);
 
+    await sleep(300 + Math.random() * 300);
+
     // Fill password
-    const passField = await this.firstVisible(SEL.loginPassword);
+    const passField = await this.firstVisible(SEL.loginPassword, 5_000);
     if (!passField) throw new Error('Cannot find password field on login page');
     await passField.click();
     await this.typeHuman(password);
@@ -188,17 +185,37 @@ export class ChessDotCom {
     if (!submit) throw new Error('Cannot find login submit button');
     await submit.click();
 
-    // Wait for redirect away from login page
+    // If still on /login after 3s, assume CAPTCHA — screenshot and wait for manual solve
+    await sleep(3_000);
+    if (this.page.url().includes('/login')) {
+      await this.page.screenshot({ path: '/tmp/debug-captcha.png' });
+      log('Browser', 'Possible CAPTCHA — screenshot at /tmp/debug-captcha.png');
+      log('Browser', 'Waiting 30s for manual CAPTCHA solve…');
+      await sleep(30_000);
+    }
+
+    // Wait for redirect away from login page (up to 15s)
     await this.page.waitForFunction(
       () => !window.location.href.includes('/login'),
       { timeout: 15_000 },
     ).catch(() => {
-      throw new Error('Login failed — still on /login after 15s. Check credentials or handle CAPTCHA manually.');
+      throw new Error('Login failed — still on /login after 15s. Check credentials or solve CAPTCHA manually.');
     });
 
     // Persist session
     await this.context.storageState({ path: STORAGE_PATH });
     log('Browser', 'Login successful, session saved');
+
+    // Verify: "Sign Up" / "Log In" button must be gone
+    const signUpStillVisible = await this.page
+      .locator('a:has-text("Sign Up"), button:has-text("Sign Up"), a:has-text("Log In")')
+      .first()
+      .isVisible({ timeout: 2_000 })
+      .catch(() => false);
+    if (signUpStillVisible) {
+      throw new Error('Login verification failed — guest buttons still visible after login');
+    }
+    log('Browser', 'Login verified');
   }
 
   // ---------------------------------------------------------------------------
@@ -214,25 +231,61 @@ export class ChessDotCom {
     await sleep(2000);
     await this.dismissPopups();
 
-    // --- Find the bot card ---
     log('Browser', `Selecting bot: ${botName}`);
-    const botSelectors = SEL.botCard(botName);
-    const botEl = await this.firstVisible(botSelectors, 6_000);
+
+    // --- Expand the "Beginner" category so bot cards become visible ---
+    // chess.com groups bots: The Circus / Beginner / Intermediate / Advanced / Master / Adaptive
+    const categoryLabel = 'Beginner';
+    const categorySelectors = [
+      `[class*="bot-group"]:has-text("${categoryLabel}")`,
+      `[class*="category"]:has-text("${categoryLabel}")`,
+      `[class*="section-header"]:has-text("${categoryLabel}")`,
+      `[class*="group-header"]:has-text("${categoryLabel}")`,
+      `[class*="accordion"]:has-text("${categoryLabel}")`,
+      `button:has-text("${categoryLabel}")`,
+      `h2:has-text("${categoryLabel}")`,
+      `h3:has-text("${categoryLabel}")`,
+      `[class*="header"]:has-text("${categoryLabel}")`,
+      `[class*="title"]:has-text("${categoryLabel}")`,
+    ];
+
+    for (const sel of categorySelectors) {
+      try {
+        const el = this.page.locator(sel).first();
+        if (await el.isVisible({ timeout: 1_500 })) {
+          await this.humanClick(el);
+          log('Browser', `Clicked category header: ${sel}`);
+          await sleep(800);
+          break;
+        }
+      } catch {}
+    }
+
+    // Scroll down in case the category is below the fold
+    await this.page.evaluate(() => window.scrollBy(0, 300));
+    await sleep(400);
+
+    // --- Find the bot card ---
+    const botEl = await this.firstVisible(SEL.botCard(botName), 8_000);
 
     if (!botEl) {
       await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
       throw new Error(
         `Bot "${botName}" not found on /play/computer. ` +
         `Screenshot saved to /tmp/debug-bot-select.png. ` +
-        `Check the page and update SEL.botCard selectors if needed.`,
+        `Update SEL.botCard or categoryLabel if the DOM changed.`,
       );
     }
 
     await this.humanClick(botEl);
-    await sleep(800);
+    await sleep(1_000);
 
-    // --- Click Play ---
-    const playBtn = await this.firstVisible(SEL.playButton, 5_000);
+    // Screenshot to confirm bot is selected (name should appear in right-panel header)
+    await this.page.screenshot({ path: '/tmp/debug-bot-selected.png' });
+    log('Browser', `Bot clicked — verify selection at /tmp/debug-bot-selected.png`);
+
+    // --- Click the green Play button ---
+    const playBtn = await this.firstVisible(SEL.playButton, 6_000);
     if (playBtn) {
       await this.humanClick(playBtn);
       log('Browser', 'Clicked Play button');
