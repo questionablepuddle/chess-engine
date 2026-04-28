@@ -30,18 +30,7 @@ export function sanMovesToUci(sanMoves: string[]): string[] {
   const uci: string[] = [];
 
   for (const san of sanMoves) {
-    // Attempt 1: pass the SAN to chess.js as-is (handles exd5, Nxd5, etc.)
-    let m = tryMove(chess, san);
-
-    // Attempt 2: "xd5" → missing from-file; try every legal move that lands
-    // on the target square and involves a capture, pick the first that parses.
-    if (!m && /^x[a-h][1-8]/.test(san)) {
-      const target = san.slice(1, 3); // e.g. "d5"
-      const legal = chess.moves({ verbose: true });
-      const candidate = legal.find(mv => mv.to === target && mv.captured);
-      if (candidate) m = tryMove(chess, candidate.san);
-    }
-
+    const m = tryParseSAN(chess, san);
     if (m) {
       uci.push(m.from + m.to + (m.promotion ?? ''));
     } else {
@@ -52,9 +41,40 @@ export function sanMovesToUci(sanMoves: string[]): string[] {
   return uci;
 }
 
+// Try to parse a SAN move, handling abbreviated / annotated forms from chess.com:
+//   - Strip check ("+"), checkmate ("#"), and annotation ("!", "?") suffixes
+//   - Use sloppy:true so chess.js accepts ambiguous notation
+//   - If the bare token still fails, try each piece prefix (N/B/R/Q/K) in case
+//     chess.com omitted it (e.g. "c3" for "Nc3")
+//   - Handle "xd5" (missing from-file) by scanning legal captures
+function tryParseSAN(chess: Chess, raw: string) {
+  // Normalise: strip trailing +, #, !, ?
+  const san = raw.replace(/[+#!?]/g, '').trim();
+
+  // Attempt 1: as-is with sloppy mode
+  let m = tryMove(chess, san);
+  if (m) return m;
+
+  // Attempt 2: try each piece prefix
+  for (const prefix of ['N', 'B', 'R', 'Q', 'K']) {
+    m = tryMove(chess, prefix + san);
+    if (m) return m;
+  }
+
+  // Attempt 3: "xd5" → no from-file capture; find legal capture landing on target
+  if (/^x[a-h][1-8]/.test(san)) {
+    const target = san.slice(1, 3);
+    const legal = chess.moves({ verbose: true });
+    const candidate = legal.find(mv => mv.to === target && mv.captured);
+    if (candidate) { m = tryMove(chess, candidate.san); if (m) return m; }
+  }
+
+  return null;
+}
+
 function tryMove(chess: Chess, san: string) {
   try {
-    return chess.move(san);
+    return chess.move(san, { sloppy: true } as any);
   } catch {
     return null;
   }
@@ -64,7 +84,7 @@ function tryMove(chess: Chess, san: string) {
 export function getLegalUciMoves(sanMoves: string[]): string[] {
   const chess = new Chess();
   for (const san of sanMoves) {
-    try { chess.move(san); } catch { break; }
+    if (!tryParseSAN(chess, san)) break;
   }
   return chess.moves({ verbose: true }).map(m => m.from + m.to + (m.promotion ?? ''));
 }
