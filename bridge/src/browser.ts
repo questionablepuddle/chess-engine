@@ -204,8 +204,43 @@ export class ChessDotCom {
         timeout: 30_000,
       });
     }
-    await sleep(2000);
+    await sleep(3000);
     await this.dismissPopups();
+
+    // -----------------------------------------------------------------------
+    // DOM debug — log all bot-related elements so we can find the right selector
+    // -----------------------------------------------------------------------
+    log('Browser', '=== DOM DEBUG: [class*="bot"] elements ===');
+    const botElements = await this.page.evaluate(() =>
+      Array.from(document.querySelectorAll('[class*="bot"]'))
+        .map(el => ({
+          tag: el.tagName,
+          className: el.className,
+          text: el.textContent?.trim().slice(0, 50),
+          ariaLabel: el.getAttribute('aria-label'),
+          title: el.getAttribute('title'),
+          dataUsername: el.getAttribute('data-username'),
+        }))
+        .filter(el => el.text || el.ariaLabel || el.title)
+        .slice(0, 30)
+    );
+    botElements.forEach((el, i) => log('Browser', `[${i}] ${JSON.stringify(el)}`));
+
+    log('Browser', '=== DOM DEBUG: bot-card / bot-item / computer-game elements ===');
+    const cardElements = await this.page.evaluate(() =>
+      Array.from(document.querySelectorAll('[class*="bot-card"], [class*="bot-item"], [class*="computer-game"]'))
+        .map(el => ({
+          tag: el.tagName,
+          className: el.className,
+          text: el.textContent?.trim().slice(0, 50),
+          ariaLabel: el.getAttribute('aria-label'),
+          title: el.getAttribute('title'),
+          dataUsername: el.getAttribute('data-username'),
+        }))
+        .filter(el => el.text || el.ariaLabel || el.title)
+    );
+    cardElements.forEach((el, i) => log('Browser', `[card:${i}] ${JSON.stringify(el)}`));
+    // -----------------------------------------------------------------------
 
     log('Browser', 'Expanding Beginner category…');
 
