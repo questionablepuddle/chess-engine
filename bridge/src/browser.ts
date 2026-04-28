@@ -329,10 +329,21 @@ export class ChessDotCom {
     return fen;
   }
 
-  // Returns all SAN move strings currently shown in the move list (both sides).
+  // Returns ALL SAN move strings from the move list (including scrolled-out moves).
   async readMoves(): Promise<string[]> {
-    // Use page.evaluate to pierce shadow DOM of web components
     const moves = await this.page.evaluate(() => {
+      // Scroll a container to the top so all moves are in the DOM,
+      // then collect every text node that looks like a move.
+      function scrollToTop(el: Element) {
+        el.scrollTop = 0;
+        // Also try inner scrollable children
+        for (const child of Array.from(el.children)) {
+          if ((child as HTMLElement).scrollHeight > (child as HTMLElement).clientHeight) {
+            (child as HTMLElement).scrollTop = 0;
+          }
+        }
+      }
+
       function collectFrom(root: Document | ShadowRoot): string[] {
         const sels = [
           'wc-simple-move-list .node',
@@ -342,18 +353,25 @@ export class ChessDotCom {
         ];
         for (const sel of sels) {
           try {
+            // Scroll the parent container to expose all moves before reading
+            const container = root.querySelector(
+              'wc-simple-move-list, .vertical-move-list, .moves, [class*="move-list"]',
+            );
+            if (container) scrollToTop(container);
+
             const els = Array.from(root.querySelectorAll(sel));
             const texts = els
               .map(e => e.textContent?.trim() ?? '')
-              .filter(t => t.length > 0 && !/^\d+\./.test(t)); // skip "1.", "2.", etc.
+              .filter(t => t.length > 0 && !/^\d+\./.test(t));
             if (texts.length) return texts;
           } catch {}
         }
 
-        // Try shadow roots of known web components
+        // Pierce shadow roots of known web components
         for (const wc of ['wc-simple-move-list', 'vertical-move-list']) {
           const el = root.querySelector(wc);
           if (el instanceof HTMLElement) {
+            scrollToTop(el);
             const sr = (el as any).shadowRoot as ShadowRoot | null;
             if (sr) {
               const inner = collectFrom(sr);
@@ -364,6 +382,7 @@ export class ChessDotCom {
 
         return [];
       }
+
       return collectFrom(document);
     });
 
@@ -487,55 +506,40 @@ export class ChessDotCom {
     return result as 'white' | 'black';
   }
 
+  // Click a square by computing its center from the board's bounding box.
+  // CSS class selectors (.square-XY) don't work inside the chess-board web
+  // component, so coordinate-based clicking is the only reliable approach.
   private async clickSquare(sq: string): Promise<void> {
-    // chess.com class: square-{file}{rank}, a=1..h=8, rank 1-8
-    const file = sq.charCodeAt(0) - 'a'.charCodeAt(0) + 1;
-    const rank = parseInt(sq[1], 10);
-    const squareClass = `.square-${file}${rank}`;
+    const file = sq.charCodeAt(0) - 'a'.charCodeAt(0) + 1; // a=1 … h=8
+    const rank = parseInt(sq[1], 10);                        // 1-8
 
-    log('Browser', `Clicking ${sq} → ${squareClass}`);
-
-    try {
-      const loc = this.page.locator(squareClass).first();
-      const box = await loc.boundingBox({ timeout: 3_000 });
-      if (box) {
-        const x = box.x + box.width * 0.5 + randomBetween(-3, 3);
-        const y = box.y + box.height * 0.5 + randomBetween(-3, 3);
-        await this.page.mouse.move(x, y, { steps: Math.ceil(randomBetween(3, 8)) });
-        await sleep(40 + randomBetween(20, 60));
-        await this.page.mouse.click(x, y);
-        return;
-      }
-    } catch (e) {
-      log('Browser', `${squareClass} not found via CSS class — falling back to coordinates: ${e}`);
-    }
-
-    // Fallback: calculate from board bounding box
-    await this.clickSquareByCoordinates(sq);
-  }
-
-  // Fallback: calculate the square center from the board's bounding box.
-  private async clickSquareByCoordinates(sq: string): Promise<void> {
     const boardEl = await this.page.$(SEL.board.join(', '));
-    if (!boardEl) throw new Error(`Cannot find board to click square ${sq}`);
-
+    if (!boardEl) throw new Error(`Board element not found when clicking ${sq}`);
     const box = await boardEl.boundingBox();
-    if (!box) throw new Error(`Board has no bounding box`);
-
-    const file = sq.charCodeAt(0) - 'a'.charCodeAt(0); // 0-7
-    const rank = parseInt(sq[1], 10) - 1; // 0-7
-
-    // If board is flipped (black perspective): invert both axes
-    const flipped = this.ourColor === 'black';
-    const col = flipped ? 7 - file : file;
-    const row = flipped ? rank : 7 - rank;
+    if (!box) throw new Error(`Board has no bounding box when clicking ${sq}`);
 
     const sqSize = box.width / 8;
-    const x = box.x + (col + 0.5) * sqSize + randomBetween(-3, 3);
-    const y = box.y + (row + 0.5) * sqSize + randomBetween(-3, 3);
 
-    await this.page.mouse.move(x, y, { steps: 5 });
-    await sleep(50);
+    let x: number;
+    let y: number;
+
+    if (this.ourColor === 'white') {
+      // a1 is bottom-left: file increases left→right, rank increases bottom→top
+      x = box.x + (file - 1 + 0.5) * sqSize;
+      y = box.y + (8 - rank + 0.5) * sqSize;
+    } else {
+      // Board is flipped: a1 is top-right, h8 is bottom-left
+      x = box.x + (8 - file + 0.5) * sqSize;
+      y = box.y + (rank - 1 + 0.5) * sqSize;
+    }
+
+    x += randomBetween(-3, 3);
+    y += randomBetween(-3, 3);
+
+    log('Browser', `Clicking ${sq} → (${Math.round(x)}, ${Math.round(y)})  [${this.ourColor}]`);
+
+    await this.page.mouse.move(x, y, { steps: Math.ceil(randomBetween(3, 8)) });
+    await sleep(40 + randomBetween(20, 60));
     await this.page.mouse.click(x, y);
   }
 
