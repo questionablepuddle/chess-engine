@@ -70,15 +70,6 @@ const SEL = {
     'button:has-text("Play Again")',
     'button:has-text("Rematch")',
   ],
-
-  // Play button in the right panel after selecting a bot
-  playButton: [
-    'button[class*="play"]:visible',
-    'button:has-text("Play"):visible',
-    'button:has-text("Play Game"):visible',
-    'button:has-text("Challenge"):visible',
-    'button:has-text("Start"):visible',
-  ],
 };
 
 // ---------------------------------------------------------------------------
@@ -194,137 +185,15 @@ export class ChessDotCom {
   }
 
   // ---------------------------------------------------------------------------
-  // Navigate to computer play page and start game vs selected bot
+  // Prepare for a human vs human game — call after pressing ENTER in terminal.
+  // Resets move history, waits for the board, and detects which color we play.
   // ---------------------------------------------------------------------------
 
-  async startGameVsBot(): Promise<void> {
-    this.allMoves = []; // reset move history for new game
-    // chess.com is a SPA — goto() on the same URL doesn't re-render the React
-    // app on game 2+. Navigate away first then back to force a fresh load.
-    log('Browser', 'Navigating to chess.com/play/computer…');
-    try {
-      await this.page.goto('https://www.chess.com/', {
-        waitUntil: 'domcontentloaded',
-        timeout: 30_000,
-      });
-      await sleep(1_000);
-      await this.page.goto('https://www.chess.com/play/computer', {
-        waitUntil: 'domcontentloaded',
-        timeout: 30_000,
-      });
-    } catch (err) {
-      const msg = String(err).toLowerCase();
-      if (msg.includes('crash') || msg.includes('target closed') || msg.includes('connection closed')) {
-        log('Browser', `Page crash during navigation — relaunching context: ${err}`);
-        await this.relaunchContext();
-        await this.page.goto('https://www.chess.com/play/computer', {
-          waitUntil: 'domcontentloaded',
-          timeout: 30_000,
-        });
-      } else {
-        throw err;
-      }
-    }
-    await this.page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {
-      log('Browser', 'networkidle timeout — continuing anyway');
-    });
-    // Wait for the bot panel to appear before interacting
-    await this.page.waitForSelector('[class*="bot"], [class*="computer"]', { timeout: 10_000 })
-      .catch(() => log('Browser', 'Bot panel selector not found — continuing anyway'));
-    await sleep(5_000);
-    await this.dismissPopups();
-
-    // Give the SPA extra time to settle before interacting with bot selection
-    await sleep(5_000);
-
-    // --- Expand Beginner section if not already open ---
-    log('Browser', 'Looking for Beginner header…');
-    try {
-      const header = this.page.locator('text="Beginner"').first();
-      if (await header.isVisible({ timeout: 5_000 })) {
-        await this.humanClick(header);
-        log('Browser', 'Clicked Beginner header');
-        await sleep(3_000);
-      }
-    } catch (e) {
-      log('Browser', `Beginner header not found or already expanded: ${e}`);
-    }
-
-    // --- Find the first Beginner bot by Y-coordinate band ---
-    // Locate the Beginner and Intermediate header Y positions, then find the
-    // first sufficiently large <img> whose top sits between those two values.
-    log('Browser', 'Finding first Beginner bot by coordinate…');
-    const martinCenter = await this.page.evaluate(() => {
-      // Find elements whose trimmed text is exactly "Beginner" or "Intermediate"
-      // and have few children (to avoid matching wrappers that contain the text).
-      const all = Array.from(document.querySelectorAll('*'));
-      const headers = all.filter(
-        el => el.children.length < 3 && el.textContent?.trim() === 'Beginner',
-      );
-      const nextHeaders = all.filter(
-        el => el.children.length < 3 && el.textContent?.trim() === 'Intermediate',
-      );
-
-      const beginnerY = headers[0]?.getBoundingClientRect().top ?? -1;
-      const intermediateY = nextHeaders[0]?.getBoundingClientRect().top ?? 9999;
-
-      if (beginnerY < 0) return null;
-
-      const imgs = Array.from(document.querySelectorAll('img')).filter(img => {
-        const r = img.getBoundingClientRect();
-        return r.top > beginnerY && r.top < intermediateY && r.width > 30;
-      });
-
-      const r = imgs[0]?.getBoundingClientRect();
-      if (!r) return null;
-      return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height };
-    });
-
-    if (!martinCenter) {
-      await this.page.screenshot({ path: '/tmp/debug-bot-select.png' });
-      throw new Error('Could not find first Beginner bot by coordinates — screenshot at /tmp/debug-bot-select.png');
-    }
-
-    log('Browser', `First Beginner bot center: ${JSON.stringify(martinCenter)}`);
-    await this.page.mouse.click(martinCenter.x, martinCenter.y);
-
-    await sleep(1_000);
-
-    // --- Read selected bot name from right panel ---
-    const selectedName = await this.page.evaluate(() => {
-      const sels = [
-        '[class*="bot-name"]', '[class*="computer-name"]',
-        '[class*="panel"] h2', '[class*="panel"] h3',
-        '[class*="sidebar"] h2', '[class*="sidebar"] h3',
-        '[class*="opponent-name"]',
-      ];
-      for (const sel of sels) {
-        const text = document.querySelector(sel)?.textContent?.trim();
-        if (text) return text;
-      }
-      return '(unknown)';
-    });
-    log('Browser', `Selected bot: ${selectedName}`);
-
-    await this.page.screenshot({ path: '/tmp/debug-bot-selected.png' });
-    log('Browser', 'Bot selection screenshot: /tmp/debug-bot-selected.png');
-
-    // --- Click Play ---
-    const playBtn = await this.firstVisible(SEL.playButton, 6_000);
-    if (playBtn) {
-      await this.humanClick(playBtn);
-      log('Browser', 'Clicked Play button');
-    } else {
-      log('Browser', 'No Play button found — game may start automatically');
-    }
-
-    // --- Wait for board ---
+  async prepareForGame(): Promise<void> {
+    this.allMoves = [];
     await this.waitForBoard();
-
     await this.page.screenshot({ path: '/tmp/debug-game-start.png' });
     log('Browser', 'Game start screenshot: /tmp/debug-game-start.png');
-
-    // --- Detect colour ---
     this.ourColor = await this.detectColor();
     log('Browser', `Playing as ${this.ourColor}`);
   }

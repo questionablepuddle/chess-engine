@@ -20,8 +20,6 @@ const ENGINE_PATH = process.env.ENGINE_PATH
   : path.resolve(__dirname, '../../engine/build/chess_engine');
 
 const MOVE_TIME_MS = 3_000;
-const GAME_DELAY_MIN = 5_000;
-const GAME_DELAY_MAX = 10_000;
 
 // ---------------------------------------------------------------------------
 // trackerChess helpers
@@ -58,7 +56,6 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
   log('Main', '--- Starting new game ---');
 
   await engine.newGame();
-  await browser.startGameVsBot();
 
   const ourColor = browser.ourColor;
 
@@ -286,6 +283,21 @@ async function main(): Promise<void> {
       gameNumber++;
       log('Main', `=== Game #${gameNumber} ===`);
 
+      if (gameNumber === 1) {
+        console.log('\n========================================');
+        console.log('Set up your game on chess.com, then press ENTER when the game starts and it\'s time to make a move...');
+        console.log('========================================\n');
+      } else {
+        console.log('\n========================================');
+        console.log('Game over. Set up next game on chess.com, then press ENTER when ready...');
+        console.log('========================================\n');
+      }
+      await new Promise(r => process.stdin.once('data', r));
+
+      if (stopping) break;
+
+      await browser.prepareForGame();
+
       try {
         await playGame(engine, browser);
       } catch (err) {
@@ -293,12 +305,6 @@ async function main(): Promise<void> {
         await browser.page.screenshot({ path: `/tmp/debug-game-${gameNumber}.png` });
         log('Main', `Screenshot saved to /tmp/debug-game-${gameNumber}.png`);
       }
-
-      if (stopping) break;
-
-      const delay = GAME_DELAY_MIN + Math.random() * (GAME_DELAY_MAX - GAME_DELAY_MIN);
-      log('Main', `Waiting ${(delay / 1000).toFixed(1)}s before next game…`);
-      await sleep(delay);
     }
   } finally {
     await shutdown();
