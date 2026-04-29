@@ -48,16 +48,19 @@ export class UCIEngine {
     log('Engine', 'New game ready');
   }
 
-  // Ask for the best move given a FEN string (or "startpos moves ..." fallback).
-  async bestMove(fen: string, moveTimeMs = 1_000): Promise<string> {
-    // If the caller passed a startpos fallback string, use it directly;
-    // otherwise wrap in "position fen ..."
+  // Ask for the best move given a FEN string.
+  // allowedMoves: UCI move strings to pass as "searchmoves"; empty = all moves.
+  async bestMove(fen: string, allowedMoves: string[], moveTimeMs = 1_000): Promise<string> {
     const posCmd = fen.startsWith('startpos')
       ? `position ${fen}`
       : `position fen ${fen}`;
     this.write(posCmd);
+
+    const movesStr = allowedMoves.length > 0
+      ? ` searchmoves ${allowedMoves.join(' ')}`
+      : '';
     const lines = await this.cmd(
-      `go movetime ${moveTimeMs}`,
+      `go movetime ${moveTimeMs}${movesStr}`,
       'bestmove',
       moveTimeMs + 8_000,
     );
@@ -112,15 +115,19 @@ export class UCIEngine {
     } catch {}
     this.proc = null;
     this.rl = null;
+    if (this.waiter) {
+      clearTimeout(this.waiter.timer);
+      this.waiter.reject(new Error('Engine process killed'));
+      this.waiter = null;
+    }
+    this.buffer = [];
   }
 
-  private write(cmd: string): void {
-    if (!this.proc?.stdin || this.proc.killed) throw new Error('Engine not running');
-    this.proc.stdin.write(cmd + '\n');
+  private write(line: string): void {
+    this.proc?.stdin?.write(line + '\n');
   }
 
-  // Send a command and wait until a line starting with `token` arrives.
-  private cmd(command: string, token: string, timeoutMs: number): Promise<string[]> {
+  private async cmd(command: string, token: string, timeoutMs: number): Promise<string[]> {
     if (this.waiter) {
       // Shouldn't happen in normal sequential use; clean up stale waiter
       clearTimeout(this.waiter.timer);

@@ -73,6 +73,11 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
   const masterMoveList: string[] = [];
   let consecutiveIllegalCount = 0;
 
+  // Moves banned from being suggested by the engine for the current FEN.
+  // Cleared whenever the position changes. Prevents infinite retry loops.
+  const bannedMoves = new Set<string>();
+  let lastFen = '';
+
   // White moves at 0, 2, 4 … (even); black at 1, 3, 5 … (odd).
   let expectedMoveCount = ourColor === 'white' ? 0 : 1;
   log('Main', `We are ${ourColor}`);
@@ -145,19 +150,28 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     const legalMoves = trackerChess.moves({ verbose: true })
       .map(m => `${m.from}${m.to}${m.promotion ?? ''}`);
 
+    // Clear banned moves when the position changes
+    if (fen !== lastFen) {
+      bannedMoves.clear();
+      lastFen = fen;
+    }
+
     log('Main', `Sending FEN to engine: ${fen}  pieces=${countPieces(trackerChess)}`);
+
+    const allowedMoves = legalMoves.filter(m => !bannedMoves.has(m));
 
     let bestMove: string;
     try {
-      bestMove = queenPromo(await engine.bestMove(fen, MOVE_TIME_MS));
+      bestMove = queenPromo(await engine.bestMove(fen, allowedMoves, MOVE_TIME_MS));
     } catch (err) {
       log('Main', `Engine error: ${err} — restarting`);
       await engine.restart();
-      bestMove = queenPromo(await engine.bestMove(fen, MOVE_TIME_MS));
+      bestMove = queenPromo(await engine.bestMove(fen, allowedMoves, MOVE_TIME_MS));
     }
 
     if (!legalMoves.includes(bestMove)) {
       consecutiveIllegalCount++;
+      bannedMoves.add(bestMove);
       log('Main', `WARNING: engine move ${bestMove} not in legal list (illegal streak=${consecutiveIllegalCount})`);
       if (consecutiveIllegalCount >= 2) {
         log('Main', `DIAG — FEN: ${fen}`);
@@ -185,15 +199,16 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
 
       log('Main', `Move ${finalMove} did not register (attempt ${attempt + 1}/3)`);
       failedMoves.add(finalMove);
+      bannedMoves.add(finalMove);
 
       if (attempt < 2) {
+        const remaining = legalMoves.filter(m => !failedMoves.has(m));
         let nextMove = '';
-        try { nextMove = queenPromo(await engine.bestMove(fen, MOVE_TIME_MS)); } catch {}
+        try { nextMove = queenPromo(await engine.bestMove(fen, remaining, MOVE_TIME_MS)); } catch {}
 
         if (!nextMove || failedMoves.has(nextMove)) {
-          const alternatives = legalMoves.filter(m => !failedMoves.has(m));
-          if (!alternatives.length) { log('Main', 'No alternative moves left'); break; }
-          nextMove = alternatives[Math.floor(Math.random() * alternatives.length)];
+          if (!remaining.length) { log('Main', 'No alternative moves left'); break; }
+          nextMove = remaining[Math.floor(Math.random() * remaining.length)];
           log('Main', `Engine repeated a failed move — random fallback: ${nextMove}`);
         }
         finalMove = nextMove;

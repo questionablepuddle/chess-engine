@@ -243,6 +243,15 @@ int SearchThread::negamax(Position& pos, int alpha, int beta, int depth,
         if (m == ss->excludedMove) continue;
         if (!pos.isLegal(m)) continue;
 
+        // At root, restrict to searchmoves if specified
+        if (root && limits_ && !limits_->searchMoves.empty()) {
+            const std::string name = moveName(m);
+            bool allowed = false;
+            for (const auto& sm : limits_->searchMoves)
+                if (sm == name) { allowed = true; break; }
+            if (!allowed) continue;
+        }
+
         moveCount++;
         bool isCapture  = m.isCapture();
         bool isPromotion = m.isPromotion();
@@ -424,9 +433,10 @@ void SearchThread::updateHistories(Position& pos, Move bestMove, int depth, int 
 
 SearchResult SearchThread::search(Position& pos, const SearchLimits& limits,
                                    const TimeManager& tm, std::atomic<bool>& stop) {
-    stop_  = &stop;
-    tm_    = &tm;
-    nodes_ = 0;
+    stop_   = &stop;
+    tm_     = &tm;
+    limits_ = &limits;
+    nodes_  = 0;
 
     clearPV();
 

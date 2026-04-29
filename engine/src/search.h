@@ -39,7 +39,7 @@ struct SearchLimits {
     int  movetime  = 0;    // ms, 0 = not set
     bool infinite  = false;
     bool ponder    = false;
-    std::vector<Move> searchMoves;
+    std::vector<std::string> searchMoves; // UCI move strings; empty = all moves
 };
 
 // ============================================================
@@ -110,6 +110,8 @@ private:
     void updateHistories(Position& pos, Move bestMove, int depth, int ply,
                          SearchStack* ss, Move* quiets, int quietCount,
                          Move* captures, int captureCount);
+
+    const SearchLimits* limits_ = nullptr;
 
     // Check if we should stop searching
     bool shouldStop() const {

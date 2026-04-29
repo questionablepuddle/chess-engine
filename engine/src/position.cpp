@@ -671,12 +671,15 @@ bool Position::isPseudoLegal(Move m) const {
         break;
     case BISHOP:
         if (afd != ard) return false;
+        if (BB::Between[from][to] & pieces()) return false;
         break;
     case ROOK:
         if (afd != 0 && ard != 0) return false;
+        if (BB::Between[from][to] & pieces()) return false;
         break;
     case QUEEN:
         if (afd != 0 && ard != 0 && afd != ard) return false;
+        if (BB::Between[from][to] & pieces()) return false;
         break;
     case KING:
         if (afd > 1 || ard > 1) return false;

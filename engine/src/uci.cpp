@@ -105,8 +105,7 @@ SearchLimits parseGo(const std::string& line) {
         else if (token == "ponder")    limits.ponder = true;
         else if (token == "searchmoves") {
             while (ss >> token) {
-                // Parse search moves (simplified)
-                limits.searchMoves.push_back(Move::none()); // placeholder
+                limits.searchMoves.push_back(token);
             }
             break;
         }
