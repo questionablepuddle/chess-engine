@@ -454,29 +454,6 @@ export class ChessDotCom {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  // Close a crashed browser context and open a fresh one in the same process.
-  // Reloads saved cookies so the session remains authenticated.
-  private async relaunchContext(): Promise<void> {
-    log('Browser', 'Closing crashed context and opening a fresh one…');
-    try { await this.context.close(); } catch {}
-
-    this.context = await this.browser.newContext({
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
-        'AppleWebKit/605.1.15 (KHTML, like Gecko) ' +
-        'Version/17.0 Safari/605.1.15',
-    });
-
-    if (fs.existsSync(COOKIES_PATH)) {
-      const saved = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
-      await this.context.addCookies(saved);
-      log('Browser', `Reloaded ${saved.length} cookies from ${COOKIES_PATH}`);
-    }
-
-    this.page = await this.context.newPage();
-    log('Browser', 'Fresh context ready');
-  }
-
   private async waitForBoard(): Promise<void> {
     log('Browser', 'Waiting for board…');
     const combined = '.board, chess-board, [class*="board"]';
