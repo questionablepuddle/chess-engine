@@ -101,42 +101,60 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     const moveCount = domSanMoves.length;
 
     // -----------------------------------------------------------------------
-    // Sync opponent's move into trackerChess via highlight detection
+    // Sync opponent's move into trackerChess
+    // Primary: read FEN directly from the board's JS state.
+    // Fallback: infer the move from last-move highlight squares.
     // -----------------------------------------------------------------------
     if (knownPlyCount < moveCount) {
-      const highlighted = await browser.readHighlightedSquares();
-      const legal = trackerChess.moves({ verbose: true });
-      let applied = false;
-
-      // Try every pair of highlighted squares — one of them should be the
-      // opponent's from/to.  We test both orderings and all promotions.
-      outer: for (let i = 0; i < highlighted.length && !applied; i++) {
-        for (let j = i + 1; j < highlighted.length && !applied; j++) {
-          const sq1 = highlighted[i];
-          const sq2 = highlighted[j];
-          const candidates = legal.filter(m =>
-            (m.from === sq1 && m.to === sq2) || (m.from === sq2 && m.to === sq1),
-          );
-          if (candidates.length === 0) continue;
-
-          // Non-promotion moves first; fall back to queen promotion.
-          const move = candidates.find(m => !m.promotion)
-                    ?? candidates.find(m => m.promotion === 'q')
-                    ?? candidates[0];
-          // Always record opponent promotion as 'q' to match the board UI
-          const oppPromo = move.promotion ? 'q' : undefined;
-          const oppUCI   = `${move.from}${move.to}${oppPromo ?? ''}`;
-          trackerChess.move({ from: move.from, to: move.to, ...(oppPromo ? { promotion: oppPromo } : {}) });
-          masterMoveList.push(oppUCI);
-          knownPlyCount++;
-          log('Main', `Opponent: ${oppUCI}  [ply ${knownPlyCount}]  pieces=${countPieces(trackerChess)}`);
-          log('Main', `FEN after opponent move: ${trackerChess.fen()}`);
-          applied = true;
+      // --- Primary: direct FEN from board component ---
+      let syncedViaFen = false;
+      const boardFen = await browser.readBoardAsFen(moveCount);
+      if (boardFen) {
+        try {
+          trackerChess = new Chess(boardFen);
+          knownPlyCount = moveCount;
+          log('Main', `Position synced from board FEN [ply ${knownPlyCount}]: ${boardFen}`);
+          syncedViaFen = true;
+        } catch (e) {
+          log('Main', `WARN: board FEN invalid (${e}) — falling back to highlight detection`);
         }
       }
 
-      if (!applied) {
-        log('Main', `WARN: could not determine opponent move from highlights [${highlighted.join(', ')}] — position may drift`);
+      // --- Fallback: highlight-based opponent move detection ---
+      if (!syncedViaFen) {
+        const highlighted = await browser.readHighlightedSquares();
+        const legal = trackerChess.moves({ verbose: true });
+        let applied = false;
+
+        // Try every pair of highlighted squares — one should be the opponent's from/to.
+        outer: for (let i = 0; i < highlighted.length && !applied; i++) {
+          for (let j = i + 1; j < highlighted.length && !applied; j++) {
+            const sq1 = highlighted[i];
+            const sq2 = highlighted[j];
+            const candidates = legal.filter(m =>
+              (m.from === sq1 && m.to === sq2) || (m.from === sq2 && m.to === sq1),
+            );
+            if (candidates.length === 0) continue;
+
+            // Non-promotion moves first; fall back to queen promotion.
+            const move = candidates.find(m => !m.promotion)
+                      ?? candidates.find(m => m.promotion === 'q')
+                      ?? candidates[0];
+            // Always record opponent promotion as 'q' to match the board UI
+            const oppPromo = move.promotion ? 'q' : undefined;
+            const oppUCI   = `${move.from}${move.to}${oppPromo ?? ''}`;
+            trackerChess.move({ from: move.from, to: move.to, ...(oppPromo ? { promotion: oppPromo } : {}) });
+            masterMoveList.push(oppUCI);
+            knownPlyCount++;
+            log('Main', `Opponent: ${oppUCI}  [ply ${knownPlyCount}]  pieces=${countPieces(trackerChess)}`);
+            log('Main', `FEN after opponent move: ${trackerChess.fen()}`);
+            applied = true;
+          }
+        }
+
+        if (!applied) {
+          log('Main', `WARN: could not determine opponent move from highlights [${highlighted.join(', ')}] — position may drift`);
+        }
       }
     }
 

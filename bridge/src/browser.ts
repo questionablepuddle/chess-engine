@@ -202,48 +202,86 @@ export class ChessDotCom {
   // Board interaction
   // ---------------------------------------------------------------------------
 
-  // Read the current FEN from chess.com's board object or DOM attributes.
-  // Tries every known API surface and logs all results so we can see which works.
-  async readFen(): Promise<string | null> {
-    const probes = await this.page.evaluate(() => {
+  // Read the current board FEN by deeply inspecting the chess-board web component's
+  // internal JS state. Logs which property path found the FEN so it can be hardcoded
+  // for efficiency once discovered. Returns null if no FEN is found.
+  async readBoardAsFen(moveCount: number): Promise<string | null> {
+    const result = await this.page.evaluate((_moveCount) => {
       const board = document.querySelector('chess-board') as any;
+      if (!board) return { fen: null as string | null, path: null as string | null };
 
-      const safe = (fn: () => any): any => {
-        try { return fn() ?? null; } catch { return null; }
+      const isFen = (s: any) => typeof s === 'string' &&
+        s.split('/').length === 8 && s.includes(' ');
+
+      const searchForFen = (obj: any, depth: number): string | null => {
+        if (depth === 0 || !obj || typeof obj !== 'object') return null;
+        for (const key of Object.getOwnPropertyNames(obj)) {
+          try {
+            const val = obj[key];
+            if (isFen(val)) return val;
+            if (typeof val === 'function') {
+              try {
+                const r = val.call(obj);
+                if (isFen(r)) return r;
+              } catch(e) {}
+            }
+            if (val && typeof val === 'object' && !Array.isArray(val)) {
+              const found = searchForFen(val, depth - 1);
+              if (found) return found;
+            }
+          } catch(e) {}
+        }
+        return null;
       };
 
-      return {
-        'board.game.getFEN()':            safe(() => board?.game?.getFEN?.()),
-        'board.game.fen()':               safe(() => board?.game?.fen?.()),
-        'board.getFen()':                 safe(() => board?.getFen?.()),
-        'board.fen':                      safe(() => board?.fen),
-        'board.getAttribute("fen")':      safe(() => board?.getAttribute?.('fen')),
-        'board.position':                 safe(() => board?.position),
-        'board.getAttribute("game").fen': safe(() => JSON.parse(board?.getAttribute?.('game') || '{}')?.fen),
-        'window.chessboard.getFen()':     safe(() => (window as any).chessboard?.getFen?.()),
-        '[fen] attr':                     safe(() => document.querySelector('[fen]')?.getAttribute('fen')),
-      };
-    });
+      const directAttempts: Array<[string, () => any]> = [
+        ['board.game.getFEN()',      () => board.game?.getFEN?.()],
+        ['board.game.fen()',         () => board.game?.fen?.()],
+        ['board.game.fen',          () => board.game?.fen],
+        ['board._game.getFEN()',     () => board._game?.getFEN?.()],
+        ['board._game.fen()',        () => board._game?.fen?.()],
+        ['board._game.fen',         () => board._game?.fen],
+        ['board.controller.getFEN()', () => board.controller?.getFEN?.()],
+        ['board.controller.fen()',   () => board.controller?.fen?.()],
+        ['board.getFen()',           () => board.getFen?.()],
+        ['board.fen',               () => board.fen],
+        ['board.position',          () => board.position],
+        ['board[fen]',              () => board.getAttribute('fen')],
+        ['board[position]',         () => board.getAttribute('position')],
+      ];
 
-    // Log every probe so we can see what chess.com exposes
-    for (const [key, val] of Object.entries(probes)) {
-      const display = val === null ? 'null' : String(val).slice(0, 100);
-      log('Browser', `FEN probe [${key}]: ${display}`);
-    }
-
-    // Return the first value that looks like a FEN (contains slashes, 7+ parts)
-    const isFen = (v: any): v is string =>
-      typeof v === 'string' && v.split('/').length >= 7;
-
-    for (const [key, val] of Object.entries(probes)) {
-      if (isFen(val)) {
-        log('Browser', `Using FEN from [${key}]: ${val}`);
-        return val;
+      for (const [path, attempt] of directAttempts) {
+        try {
+          const r = attempt();
+          if (isFen(r)) return { fen: r as string, path };
+        } catch(e) {}
       }
-    }
 
-    log('Browser', 'FEN: all probes returned null — will fall back to SAN');
-    return null;
+      const internalKeys = Object.keys(board).filter(k =>
+        k.startsWith('__') || k.startsWith('_'));
+      for (const key of internalKeys) {
+        try {
+          const val = (board as any)[key];
+          if (isFen(val)) return { fen: val as string, path: `board.${key}` };
+          if (val && typeof val === 'object') {
+            const found = searchForFen(val, 3);
+            if (found) return { fen: found, path: `board.${key} (deep)` };
+          }
+        } catch(e) {}
+      }
+
+      const deepResult = searchForFen(board, 4);
+      if (deepResult) return { fen: deepResult, path: 'deep search (depth 4)' };
+
+      return { fen: null, path: null };
+    }, moveCount);
+
+    if (result.fen) {
+      log('Browser', `readBoardAsFen found via [${result.path}]: ${result.fen}`);
+    } else {
+      log('Browser', 'readBoardAsFen: no FEN found in chess-board component');
+    }
+    return result.fen;
   }
 
   // Returns the algebraic names of all highlighted squares (e.g. ["e2","e4"]).
