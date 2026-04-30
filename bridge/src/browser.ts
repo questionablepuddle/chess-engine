@@ -423,8 +423,8 @@ export class ChessDotCom {
       await this.handlePromotion(promo);
     }
 
-    // Wait up to 3s for the move to register
-    const deadline = Date.now() + 3_000;
+    // Wait up to 5s for the move to register
+    const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
       const current = (await this.readMoves()).length;
       if (current > prevMoveCount) return true;

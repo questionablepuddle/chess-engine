@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import * as path from 'path';
-import { Chess } from 'chess.js';
+import { Chess, Square } from 'chess.js';
 import { UCIEngine } from './engine';
 import { ChessDotCom } from './browser';
 import { sleep, humanDelay, log } from './utils';
@@ -159,79 +159,94 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
     }
 
     // -----------------------------------------------------------------------
-    // Ask engine for best move
+    // Ask engine for best move, then execute — retrying with fresh engine
+    // evaluations until a move registers or all legal moves are exhausted.
+    // Never plays a random move.
     // -----------------------------------------------------------------------
     const fen = trackerChess.fen();
     const legalMoves = trackerChess.moves({ verbose: true })
       .map(m => `${m.from}${m.to}${m.promotion ?? ''}`);
 
-    // Clear banned moves when the position changes
+    // Clear cross-turn bans when the position changes
     if (fen !== lastFen) {
       bannedMoves.clear();
       lastFen = fen;
     }
 
-    log('Main', `Sending FEN to engine: ${fen}  pieces=${countPieces(trackerChess)}`);
-
-    const allowedMoves = legalMoves.filter(m => !bannedMoves.has(m));
-
-    let bestMove: string;
-    try {
-      bestMove = queenPromo(await engine.bestMove(fen, allowedMoves, MOVE_TIME_MS));
-    } catch (err) {
-      log('Main', `Engine error: ${err} — restarting`);
-      await engine.restart();
-      bestMove = queenPromo(await engine.bestMove(fen, allowedMoves, MOVE_TIME_MS));
-    }
-
-    if (!legalMoves.includes(bestMove)) {
-      consecutiveIllegalCount++;
-      bannedMoves.add(bestMove);
-      log('Main', `WARNING: engine move ${bestMove} not in legal list (illegal streak=${consecutiveIllegalCount})`);
-      if (consecutiveIllegalCount >= 2) {
-        log('Main', `DIAG — FEN: ${fen}`);
-        log('Main', `DIAG — legal moves: [${legalMoves.join(' ')}]`);
-        log('Main', `Rebuilding trackerChess from masterMoveList (${masterMoveList.length} moves): ${masterMoveList.join(' ')}`);
-        trackerChess = rebuildTrackerFromList(masterMoveList);
-        log('Main', `FEN after rebuild: ${trackerChess.fen()}  pieces=${countPieces(trackerChess)}`);
-      }
-    } else {
-      consecutiveIllegalCount = 0;
-    }
+    log('Main', `Our turn — FEN: ${fen}  pieces=${countPieces(trackerChess)}  legal=${legalMoves.length}`);
 
     await humanDelay();
 
-    // -----------------------------------------------------------------------
-    // Execute — retry up to 3 times with different moves if needed
-    // -----------------------------------------------------------------------
-    const failedMoves = new Set<string>();
+    // triedMoves tracks every move attempted this turn so we never repeat one.
+    const triedMoves = new Set<string>();
     let registered = false;
-    let finalMove = bestMove;
+    let finalMove = '';
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      registered = await browser.executeMove(finalMove, moveCount).catch(() => false);
-      if (registered) { bestMove = finalMove; break; }
-
-      log('Main', `Move ${finalMove} did not register (attempt ${attempt + 1}/3)`);
-      failedMoves.add(finalMove);
-      bannedMoves.add(finalMove);
-
-      if (attempt < 2) {
-        const remaining = legalMoves.filter(m => !failedMoves.has(m));
-        let nextMove = '';
-        try { nextMove = queenPromo(await engine.bestMove(fen, remaining, MOVE_TIME_MS)); } catch {}
-
-        if (!nextMove || failedMoves.has(nextMove)) {
-          if (!remaining.length) { log('Main', 'No alternative moves left'); break; }
-          nextMove = remaining[Math.floor(Math.random() * remaining.length)];
-          log('Main', `Engine repeated a failed move — random fallback: ${nextMove}`);
-        }
-        finalMove = nextMove;
+    while (true) {
+      // Candidates: legal moves not yet tried this turn
+      const candidates = legalMoves.filter(m => !triedMoves.has(m));
+      if (candidates.length === 0) {
+        log('Main', `All ${legalMoves.length} legal moves tried and failed — game likely over or page crashed`);
+        break;
       }
+
+      // Ask engine for its best evaluated move among candidates.
+      // Prefer moves not in bannedMoves; fall back to full candidates if all are banned.
+      const searchMoves = candidates.filter(m => !bannedMoves.has(m));
+      const engineInput  = searchMoves.length > 0 ? searchMoves : candidates;
+
+      let move: string;
+      try {
+        move = queenPromo(await engine.bestMove(fen, engineInput, MOVE_TIME_MS));
+      } catch (err) {
+        log('Main', `Engine error: ${err} — restarting`);
+        try {
+          await engine.restart();
+          move = queenPromo(await engine.bestMove(fen, engineInput, MOVE_TIME_MS));
+        } catch (err2) {
+          log('Main', `Engine failed after restart: ${err2} — ending game`);
+          break;
+        }
+      }
+
+      // Guard: skip if engine returned a move not in the legal list
+      if (!legalMoves.includes(move)) {
+        consecutiveIllegalCount++;
+        log('Main', `WARNING: engine move ${move} not in legal list (illegal streak=${consecutiveIllegalCount})`);
+        if (consecutiveIllegalCount >= 2) {
+          log('Main', `DIAG — FEN: ${fen}`);
+          log('Main', `DIAG — legal: [${legalMoves.join(' ')}]`);
+          log('Main', `Rebuilding trackerChess from masterMoveList (${masterMoveList.length}): ${masterMoveList.join(' ')}`);
+          trackerChess = rebuildTrackerFromList(masterMoveList);
+          log('Main', `FEN after rebuild: ${trackerChess.fen()}  pieces=${countPieces(trackerChess)}`);
+        }
+        triedMoves.add(move);
+        bannedMoves.add(move);
+        continue;
+      }
+      consecutiveIllegalCount = 0;
+
+      // Guard: skip if the from-square has no piece in trackerChess (position drift)
+      const fromSq = move.slice(0, 2) as Square;
+      if (!trackerChess.get(fromSq)) {
+        log('Main', `SKIP: move ${move} — from square ${fromSq} is empty in trackerChess`);
+        triedMoves.add(move);
+        bannedMoves.add(move);
+        continue;
+      }
+
+      triedMoves.add(move);
+      finalMove = move;
+
+      registered = await browser.executeMove(move, moveCount).catch(() => false);
+      if (registered) break;
+
+      log('Main', `Move ${move} did not register — asking engine for next best move (tried ${triedMoves.size}/${legalMoves.length})`);
+      bannedMoves.add(move);
     }
 
     if (!registered) {
-      log('Main', 'All 3 move attempts failed — ending game');
+      log('Main', 'No move registered — ending game');
       break;
     }
 
