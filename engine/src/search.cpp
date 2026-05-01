@@ -2,6 +2,7 @@
 #include "movegen.h"
 #include "evaluate.h"
 #include "tt.h"
+#include "syzygy.h"
 #include <iostream>
 #include <sstream>
 #include <algorithm>
@@ -186,6 +187,37 @@ int SearchThread::negamax(Position& pos, int alpha, int beta, int depth,
     bool improving = !ss->inCheck && ply >= 2
                    && (ss-2)->staticEval != VALUE_NONE
                    && eval > (ss-2)->staticEval;
+
+    // ---- Syzygy WDL probe ----
+    // Probe for positions with few enough pieces and no castling rights.
+    // Returns an exact score; store in TT so sibling nodes can reuse it.
+    if (!root && Syzygy::MaxPieces > 0
+        && popcount(pos.pieces()) <= Syzygy::MaxPieces
+        && pos.castlingRights() == 0)
+    {
+        int tbScore = Syzygy::probeWDL(pos);
+        if (tbScore != VALUE_NONE) {
+            // Adjust mate scores by ply so they are correctly ordered
+            if (tbScore >  1) tbScore =  VALUE_MATE - 200 - ply;
+            if (tbScore < -1) tbScore = -(VALUE_MATE - 200 - ply);
+
+            TTBound bound = (tbScore >= beta)  ? BOUND_LOWER
+                          : (tbScore <= alpha) ? BOUND_UPPER
+                          :                     BOUND_EXACT;
+            TT.store(pos.key(), ply, tbScore, tbScore, Move::none(), depth, bound);
+
+            if (bound == BOUND_EXACT
+                || (bound == BOUND_LOWER && tbScore >= beta)
+                || (bound == BOUND_UPPER && tbScore <= alpha))
+                return tbScore;
+
+            // Narrow window on PV nodes to help with move ordering
+            if (pvNode) {
+                if (bound == BOUND_LOWER) alpha = std::max(alpha, tbScore);
+                else                      beta  = std::min(beta,  tbScore);
+            }
+        }
+    }
 
     // ---- Pruning (not in check, not PV) ----
     if (!pvNode && !ss->inCheck && ss->excludedMove.isNone()) {
@@ -454,6 +486,31 @@ SearchResult SearchThread::search(Position& pos, const SearchLimits& limits,
 
     int maxDepth = (limits.depth > 0) ? limits.depth : SearchStack::MAX_PLY - 1;
     SearchResult result;
+
+    // ---- Syzygy DTZ probe at root ----
+    // If we have tablebases and the position has few enough pieces, get the
+    // best move directly without searching.  tb_probe_root is not thread-safe,
+    // so it is only called here, once, before iterative deepening.
+    if (Syzygy::MaxPieces > 0
+        && popcount(pos.pieces()) <= Syzygy::MaxPieces
+        && pos.castlingRights() == 0)
+    {
+        int tbScore = VALUE_NONE;
+        Move tbMove = Syzygy::probeRoot(pos, tbScore);
+        if (!tbMove.isNone()) {
+            if (id_ == 0) {
+                // Print a synthetic info line so the GUI sees the score
+                std::cout << "info depth 0 score cp " << tbScore
+                          << " nodes 1 pv " << moveName(tbMove) << "\n";
+                std::cout.flush();
+            }
+            result.bestMove   = tbMove;
+            result.ponderMove = Move::none();
+            result.score      = tbScore;
+            result.depth      = 0;
+            return result;
+        }
+    }
 
     int  prevScore = VALUE_NONE;
     Move bestMove  = Move::none();

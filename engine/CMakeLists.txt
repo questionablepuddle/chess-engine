@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ChessEngine VERSION 1.0.0 LANGUAGES CXX)
+project(ChessEngine VERSION 1.0.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     endif()
 endif()
 
+# Fathom Syzygy tablebase library (C code — compiled separately)
+add_library(fathom STATIC src/fathom/src/tbprobe.c src/fathom/src/tbchess.c)
+target_include_directories(fathom PUBLIC src/fathom/src)
+set_target_properties(fathom PROPERTIES C_STANDARD 11)
+
 # Source files
 set(ENGINE_SOURCES
     src/main.cpp
@@ -49,11 +54,13 @@ set(ENGINE_SOURCES
     src/book.cpp
     src/uci.cpp
     src/thread.cpp
+    src/syzygy.cpp
 )
 
 # Main engine executable
 add_executable(chess_engine ${ENGINE_SOURCES})
 target_include_directories(chess_engine PRIVATE src)
+target_link_libraries(chess_engine PRIVATE fathom)
 
 # Enable LTO for release
 if(CMAKE_BUILD_TYPE STREQUAL "Release")

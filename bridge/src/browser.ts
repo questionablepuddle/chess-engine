@@ -192,10 +192,69 @@ export class ChessDotCom {
   async prepareForGame(): Promise<void> {
     this.allMoves = [];
     await this.waitForBoard();
+    await this.debugChessBoardProperties();
     await this.page.screenshot({ path: '/tmp/debug-game-start.png' });
     log('Browser', 'Game start screenshot: /tmp/debug-game-start.png');
     this.ourColor = await this.detectColor();
     log('Browser', `Playing as ${this.ourColor}`);
+  }
+
+  // Deep inspection of the chess-board web component to find FEN property paths.
+  // Logs everything so we can hardcode the winning path in readBoardAsFen.
+  async debugChessBoardProperties(): Promise<void> {
+    const result = await this.page.evaluate(() => {
+      const board = document.querySelector('chess-board') as any;
+      if (!board) return 'no board found';
+
+      const findings: string[] = [];
+
+      findings.push('Own props: ' + Object.getOwnPropertyNames(board).join(', '));
+      findings.push('Keys: ' + Object.keys(board).join(', '));
+
+      let proto = Object.getPrototypeOf(board);
+      let depth = 0;
+      while (proto && depth < 5) {
+        findings.push(`Proto[${depth}]: ` +
+          Object.getOwnPropertyNames(proto).join(', '));
+        proto = Object.getPrototypeOf(proto);
+        depth++;
+      }
+
+      const scan = (obj: any, path: string, maxDepth: number) => {
+        if (maxDepth === 0 || !obj || typeof obj !== 'object') return;
+        try {
+          for (const key of Object.getOwnPropertyNames(obj)) {
+            try {
+              const val = obj[key];
+              const fullPath = path + '.' + key;
+              if (typeof val === 'string' && val.includes('/') &&
+                  val.split('/').length >= 7) {
+                findings.push('POSSIBLE FEN at ' + fullPath + ': ' + val);
+              }
+              if (typeof val === 'function') {
+                try {
+                  const r = val.call(obj);
+                  if (typeof r === 'string' && r.includes('/') &&
+                      r.split('/').length >= 7) {
+                    findings.push('POSSIBLE FEN from fn ' + fullPath + '(): ' + r);
+                  }
+                } catch(e) {}
+              }
+              if (val && typeof val === 'object' && maxDepth > 1) {
+                scan(val, fullPath, maxDepth - 1);
+              }
+            } catch(e) {}
+          }
+        } catch(e) {}
+      };
+
+      scan(board, 'board', 4);
+      return findings.join('\n');
+    });
+
+    result.split('\n').forEach(line => {
+      if (line) log('Board', line);
+    });
   }
 
   // ---------------------------------------------------------------------------

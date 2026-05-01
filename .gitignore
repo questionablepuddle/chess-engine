@@ -67,3 +67,8 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Syzygy tablebase files (large binaries, not tracked in git)
+syzygy/
+*.rtbw
+*.rtbz

@@ -4,6 +4,7 @@
 #include "book.h"
 #include "tt.h"
 #include "movegen.h"
+#include "syzygy.h"
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -228,6 +229,15 @@ void loop() {
                 Book.load(value);
             } else if (name == "NNUEFile") {
                 NNUE::load(value);
+            } else if (name == "SyzygyPath") {
+                if (!value.empty() && value != "<empty>") {
+                    bool ok = Syzygy::init(value);
+                    std::cout << "info string Syzygy "
+                              << (ok ? "loaded" : "failed")
+                              << " MaxPieces=" << Syzygy::MaxPieces
+                              << " path=" << value << "\n";
+                    std::cout.flush();
+                }
             }
 
         } else if (token == "quit") {

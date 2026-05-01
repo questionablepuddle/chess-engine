@@ -38,6 +38,11 @@ export class UCIEngine {
     await this.spawnProc();
     await this.cmd('uci', 'uciok', 5_000);
     this.write('setoption name MultiPV value 3');
+    const syzygyPath = process.env.SYZYGY_PATH;
+    if (syzygyPath) {
+      this.write(`setoption name SyzygyPath value ${syzygyPath}`);
+      log('Engine', `SyzygyPath: ${syzygyPath}`);
+    }
     await this.cmd('isready', 'readyok', 5_000);
     log('Engine', `Ready  (${path.basename(this.enginePath)})`);
   }
