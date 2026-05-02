@@ -1,6 +1,7 @@
 #include "syzygy.h"
 #include "movegen.h"
 #include "bitboard.h"
+#include <iostream>
 
 extern "C" {
 #include "fathom/src/tbprobe.h"
@@ -13,6 +14,11 @@ int MaxPieces = 0;
 bool init(const std::string& path) {
     bool ok = tb_init(path.c_str());
     MaxPieces = ok ? static_cast<int>(TB_LARGEST) : 0;
+    std::cerr << "[Syzygy] tb_init=" << (ok ? "true" : "false")
+              << " TB_LARGEST=" << TB_LARGEST
+              << " path=" << path << "\n";
+    if (TB_LARGEST == 0)
+        std::cerr << "[Syzygy] TB_LARGEST=0: tablebase files not found\n";
     return ok;
 }
 

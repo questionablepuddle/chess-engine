@@ -105,7 +105,10 @@ export class UCIEngine {
 
     this.proc.on('error', err => log('Engine', `Spawn error: ${err.message}`));
     this.proc.on('exit', code => log('Engine', `Process exited (${code})`));
-    this.proc.stderr?.on('data', () => {}); // discard engine debug output
+    this.proc.stderr?.on('data', (data: Buffer) => {
+      const text = data.toString().trim();
+      if (text) log('Engine', `[stderr] ${text}`);
+    });
 
     this.rl = readline.createInterface({ input: this.proc.stdout! });
     this.rl.on('line', (line: string) => this.onLine(line));
@@ -164,6 +167,8 @@ export class UCIEngine {
       const { resolve } = this.waiter;
       this.waiter = null;
       resolve([...this.buffer]);
+    } else if (!this.waiter) {
+      log('Engine', line);
     }
   }
 }

@@ -234,8 +234,7 @@ void loop() {
                     bool ok = Syzygy::init(value);
                     std::cout << "info string Syzygy "
                               << (ok ? "loaded" : "failed")
-                              << " MaxPieces=" << Syzygy::MaxPieces
-                              << " path=" << value << "\n";
+                              << " TB_LARGEST=" << Syzygy::MaxPieces << "\n";
                     std::cout.flush();
                 }
             }
