@@ -35,9 +35,14 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
 endif()
 
 # Fathom Syzygy tablebase library (C code — compiled separately)
-add_library(fathom STATIC src/fathom/src/tbprobe.c src/fathom/src/tbchess.c)
+add_library(fathom STATIC src/fathom/src/tbprobe.c)
 target_include_directories(fathom PUBLIC src/fathom/src)
-set_target_properties(fathom PROPERTIES C_STANDARD 11)
+set_target_properties(fathom PROPERTIES C_STANDARD 11 COMPILE_FLAGS "-w")
+target_compile_options(fathom PRIVATE
+  -Wno-unused-function
+  -Wno-unused-const-variable
+  -Wno-unused-variable
+)
 
 # Source files
 set(ENGINE_SOURCES
