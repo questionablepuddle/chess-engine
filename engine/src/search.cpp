@@ -190,9 +190,12 @@ int SearchThread::negamax(Position& pos, int alpha, int beta, int depth,
 
     // ---- Syzygy WDL probe ----
     // Probe for positions with few enough pieces and no castling rights.
+    // Require >= 2 pieces (both kings) to avoid Fathom crash on corrupt positions.
     // Returns an exact score; store in TT so sibling nodes can reuse it.
+    int tbPieceCount = popcount(pos.pieces());
     if (!root && Syzygy::MaxPieces > 0
-        && popcount(pos.pieces()) <= Syzygy::MaxPieces
+        && tbPieceCount >= 2
+        && tbPieceCount <= Syzygy::MaxPieces
         && pos.castlingRights() == 0)
     {
         int tbScore = Syzygy::probeWDL(pos);
@@ -292,10 +295,8 @@ int SearchThread::negamax(Position& pos, int alpha, int beta, int depth,
         if (!pvNode && !ss->inCheck && depth <= 8 && !isCapture && !isPromotion
             && bestScore > -MATE_IN_MAX_PLY) {
             int lmp_threshold = (3 + depth * depth) * (improving ? 2 : 1);
-            if (moveCount > lmp_threshold) {
-                mp.next(); // skip remaining quiets
+            if (moveCount > lmp_threshold)
                 break;
-            }
         }
 
         // ---- Futility pruning ----
@@ -491,7 +492,9 @@ SearchResult SearchThread::search(Position& pos, const SearchLimits& limits,
     // If we have tablebases and the position has few enough pieces, get the
     // best move directly without searching.  tb_probe_root is not thread-safe,
     // so it is only called here, once, before iterative deepening.
+    // Require >= 2 pieces to avoid Fathom crash on degenerate positions.
     if (Syzygy::MaxPieces > 0
+        && popcount(pos.pieces()) >= 2
         && popcount(pos.pieces()) <= Syzygy::MaxPieces
         && pos.castlingRights() == 0)
     {

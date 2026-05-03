@@ -174,6 +174,8 @@ void loop() {
         std::string token;
         ss >> token;
 
+        try {
+
         if (token == "uci") {
             printId();
 
@@ -291,6 +293,14 @@ void loop() {
             std::printf("%-16s %6s %6s %6s %6s %6d\n", "Tempo", "", "", "", "", (pos.sideToMove() == WHITE) ? TEMPO : -TEMPO);
             std::printf("%-16s %6s %6s %6s %6s %6d\n", "TOTAL", "", "", "", "", score);
             std::cout << "(positive = good for white, result is from side-to-move perspective: " << score << " cp)\n";
+        }
+
+        } catch (const std::exception& e) {
+            std::cerr << "UCI command error (" << token << "): " << e.what() << "\n";
+            std::cout.flush();
+        } catch (...) {
+            std::cerr << "UCI command error (" << token << "): unknown exception\n";
+            std::cout.flush();
         }
     }
 }

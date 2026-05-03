@@ -16,6 +16,9 @@ export class UCIEngine {
   // Lines received since last clearBuffer()
   private buffer: string[] = [];
 
+  // Syzygy path supplied at init-time; re-sent after every restart.
+  private syzygyPath: string | null = null;
+
   // One active waiter at a time (we always await sequentially)
   private waiter: {
     token: string;
@@ -40,6 +43,7 @@ export class UCIEngine {
     this.write('setoption name MultiPV value 3');
     const syzygyPath = process.env.SYZYGY_PATH;
     if (syzygyPath) {
+      this.syzygyPath = syzygyPath;
       this.write(`setoption name SyzygyPath value ${syzygyPath}`);
       log('Engine', `SyzygyPath: ${syzygyPath}`);
     }
@@ -56,6 +60,17 @@ export class UCIEngine {
   // Ask for the best move given a FEN string.
   // allowedMoves: UCI move strings to pass as "searchmoves"; empty = all moves.
   async bestMove(fen: string, allowedMoves: string[], moveTimeMs = 1_000): Promise<string> {
+    try {
+      return await this._bestMoveOnce(fen, allowedMoves, moveTimeMs);
+    } catch (err) {
+      log('Engine', `bestMove failed (${(err as Error).message}), restarting and retrying…`);
+      await this.restart();
+      // Re-send position context and retry the search.
+      return await this._bestMoveOnce(fen, allowedMoves, moveTimeMs);
+    }
+  }
+
+  private async _bestMoveOnce(fen: string, allowedMoves: string[], moveTimeMs: number): Promise<string> {
     const posCmd = fen.startsWith('startpos')
       ? `position ${fen}`
       : `position fen ${fen}`;
@@ -85,6 +100,12 @@ export class UCIEngine {
     this.killProc();
     await this.spawnProc();
     await this.cmd('uci', 'uciok', 5_000);
+    if (this.syzygyPath) {
+      this.write(`setoption name SyzygyPath value ${this.syzygyPath}`);
+      log('Engine', `Re-sent SyzygyPath: ${this.syzygyPath}`);
+    }
+    // Reset engine state before continuing mid-game.
+    this.write('ucinewgame');
     await this.cmd('isready', 'readyok', 5_000);
     log('Engine', 'Restarted');
   }
@@ -104,7 +125,17 @@ export class UCIEngine {
     this.proc = spawn(this.enginePath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
 
     this.proc.on('error', err => log('Engine', `Spawn error: ${err.message}`));
-    this.proc.on('exit', code => log('Engine', `Process exited (${code})`));
+    this.proc.on('exit', (code: number | null, signal: string | null) => {
+      log('Engine', `Process exited (code=${code} signal=${signal})`);
+      // Reject any pending waiter immediately so callers don't hang for the
+      // full timeout before discovering the engine has died.
+      if (this.waiter) {
+        clearTimeout(this.waiter.timer);
+        const { reject } = this.waiter;
+        this.waiter = null;
+        reject(new Error(`Engine process died (code=${code} signal=${signal})`));
+      }
+    });
     this.proc.stderr?.on('data', (data: Buffer) => {
       const text = data.toString().trim();
       if (text) log('Engine', `[stderr] ${text}`);
