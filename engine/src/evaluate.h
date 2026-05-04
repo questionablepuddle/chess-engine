@@ -35,10 +35,12 @@ struct EvalInfo {
     TaperedScore kingSafety[2];
     TaperedScore rooks[2];
     TaperedScore bishops[2];
+    TaperedScore threats[2];
+    TaperedScore coordination[2];
     int phase;
 };
 
 int evaluateDetailed(const Position& pos, EvalInfo& info);
 
 // Tempo bonus
-constexpr int TEMPO = 10;
+constexpr int TEMPO = 15;

@@ -106,11 +106,22 @@ inline TaperedScore pst(Color c, PieceType pt, Square s) {
 }
 
 // ============================================================
+// Color square masks
+// ============================================================
+// Dark squares: (file + rank) % 2 == 0 → a1, c1, e1, g1, b2, ...
+static constexpr Bitboard DarkSquares  = 0x55AA55AA55AA55AAULL;
+static constexpr Bitboard LightSquares = 0xAA55AA55AA55AA55ULL;
+
+// ============================================================
 // Pawn structure evaluation
 // ============================================================
 
+// Rank-indexed passed pawn bonus (from advancing side's perspective, rank=0..7)
+static const int PassedPawnBonus[8] = { 0, 0, 0, 10, 20, 40, 70, 120 };
+
 static TaperedScore evalPawns(const Position& pos) {
     TaperedScore score;
+    bool isEndgame = pos.nonPawnMaterial() < 2000;
 
     for (Color c : {WHITE, BLACK}) {
         Color them = ~c;
@@ -133,8 +144,15 @@ static TaperedScore evalPawns(const Position& pos) {
             bool passed = !(theirPawns & ahead);
             if (passed) {
                 int rank = (c == WHITE) ? r : 7 - r;
-                int bonus = rank * rank * 5; // scales with rank
+                int bonus = PassedPawnBonus[rank];
                 score += TaperedScore{sign * bonus / 2, sign * bonus};
+
+                // King protecting passed pawn in endgame
+                if (isEndgame && bonus > 0) {
+                    Square ksq = pos.kingSquare(c);
+                    if (chebyshev(ksq, s) <= 1)
+                        score += TaperedScore{0, sign * 20};
+                }
             }
 
             // Doubled pawn: another friendly pawn on same file
@@ -151,33 +169,8 @@ static TaperedScore evalPawns(const Position& pos) {
 }
 
 // ============================================================
-// Mobility tables — scaled to ~50% of Stockfish values because our
-// mobility counts are higher (raw slider attacks, no pawn-attack exclusion)
-// ============================================================
-
-// Mobility tables scaled to ~25% of Stockfish values.
-// Our raw slider mobility (no pawn-attack exclusion) produces 2-3x higher counts
-// than Stockfish's restricted computation, so the same tables inflate scores.
-static const TaperedScore KnightMobBonus[9] = {
-    S(-15,-20),S(-13,-14),S(-3,-7),S(-1,-3),S(0,2),S(3,3),S(5,5),S(7,6),S(8,8)
-};
-static const TaperedScore BishopMobBonus[14] = {
-    S(-12,-14),S(-5,-5),S(4,0),S(6,3),S(9,6),S(12,10),S(13,13),S(15,14),
-    S(15,16),S(17,18),S(20,19),S(20,21),S(22,22),S(24,24)
-};
-static const TaperedScore RookMobBonus[15] = {
-    S(-15,-19),S(-5,-4),S(0,5),S(0,9),S(0,17),S(2,24),S(5,25),S(7,30),
-    S(10,33),S(10,34),S(10,39),S(12,41),S(14,42),S(14,42),S(15,43)
-};
-static const TaperedScore QueenMobBonus[28] = {
-    S(-7,-12),S(-3,-7),S(-2,-1),S(-2,4),S(5,10),S(5,13),S(5,14),S(8,18),
-    S(9,19),S(13,24),S(16,24),S(16,25),S(16,30),S(16,31),S(16,32),S(16,33),
-    S(18,34),S(18,35),S(19,36),S(19,37),S(23,37),S(27,42),S(28,42),S(29,42),
-    S(45,42),S(46,44),S(48,45),S(51,47)
-};
-
-// ============================================================
-// Mobility evaluation
+// Mobility — flat bonus per available square (attack bitboards, not legal moves)
+// Knight: +4cp/sq, Bishop: +3cp/sq, Rook: +2cp/sq, Queen: +1cp/sq
 // ============================================================
 
 static TaperedScore evalMobility(const Position& pos) {
@@ -192,25 +185,25 @@ static TaperedScore evalMobility(const Position& pos) {
         while (knights) {
             Square s = popLSB(knights);
             int mob = popcount(BB::KnightAttacks[s] & ~own);
-            score += TaperedScore{sign * KnightMobBonus[mob].mg, sign * KnightMobBonus[mob].eg};
+            score += TaperedScore{sign * mob * 4, sign * mob * 4};
         }
         Bitboard bishops = pos.pieces(c, BISHOP);
         while (bishops) {
             Square s = popLSB(bishops);
-            int mob = std::min(popcount(BB::bishopAttacks(s, occ) & ~own), 13);
-            score += TaperedScore{sign * BishopMobBonus[mob].mg, sign * BishopMobBonus[mob].eg};
+            int mob = popcount(BB::bishopAttacks(s, occ) & ~own);
+            score += TaperedScore{sign * mob * 3, sign * mob * 3};
         }
         Bitboard rooks = pos.pieces(c, ROOK);
         while (rooks) {
             Square s = popLSB(rooks);
-            int mob = std::min(popcount(BB::rookAttacks(s, occ) & ~own), 14);
-            score += TaperedScore{sign * RookMobBonus[mob].mg, sign * RookMobBonus[mob].eg};
+            int mob = popcount(BB::rookAttacks(s, occ) & ~own);
+            score += TaperedScore{sign * mob * 2, sign * mob * 2};
         }
         Bitboard queens = pos.pieces(c, QUEEN);
         while (queens) {
             Square s = popLSB(queens);
-            int mob = std::min(popcount(BB::queenAttacks(s, occ) & ~own), 27);
-            score += TaperedScore{sign * QueenMobBonus[mob].mg, sign * QueenMobBonus[mob].eg};
+            int mob = popcount(BB::queenAttacks(s, occ) & ~own);
+            score += TaperedScore{sign * mob, sign * mob};
         }
     }
 
@@ -218,24 +211,69 @@ static TaperedScore evalMobility(const Position& pos) {
 }
 
 // ============================================================
-// Rook evaluation
+// Piece coordination — passivity penalties and structural bonuses
+// ============================================================
+
+static TaperedScore evalPieceCoordination(const Position& pos) {
+    TaperedScore score;
+
+    for (Color c : {WHITE, BLACK}) {
+        int sign = (c == WHITE) ? 1 : -1;
+
+        // Knight on back rank penalty (-20cp each)
+        Bitboard backRank = (c == WHITE) ? RankBB[RANK_1] : RankBB[RANK_8];
+        int knightsBack = popcount(pos.pieces(c, KNIGHT) & backRank);
+        score += TaperedScore{sign * -20 * knightsBack, sign * -20 * knightsBack};
+
+        // Bishop blocked by own pawns on same color square (-15cp per pawn)
+        Bitboard bishops = pos.pieces(c, BISHOP);
+        while (bishops) {
+            Square s = popLSB(bishops);
+            Bitboard colorMask = (squareBB(s) & LightSquares) ? LightSquares : DarkSquares;
+            int blockedPawns = popcount(pos.pieces(c, PAWN) & colorMask);
+            score += TaperedScore{sign * -15 * blockedPawns, sign * -15 * blockedPawns};
+        }
+    }
+
+    return score;
+}
+
+// ============================================================
+// Rook evaluation — open files and connectivity
 // ============================================================
 
 static TaperedScore evalRooks(const Position& pos) {
     TaperedScore score;
+    Bitboard occ = pos.pieces();
+
     for (Color c : {WHITE, BLACK}) {
         int sign = (c == WHITE) ? 1 : -1;
         Bitboard rooks = pos.pieces(c, ROOK);
+        Bitboard allRooks = rooks;
+
         while (rooks) {
             Square s = popLSB(rooks);
             File f = fileOf(s);
-            // Open file
             bool no_own_pawn  = !(pos.pieces(c, PAWN) & FileBB[f]);
             bool no_their_pawn = !(pos.pieces(~c, PAWN) & FileBB[f]);
             if (no_own_pawn && no_their_pawn)
-                score += TaperedScore{sign * 36, sign * 16}; // open file
+                score += TaperedScore{sign * 20, sign * 20}; // open file
             else if (no_own_pawn)
-                score += TaperedScore{sign * 20, sign * 7};  // semi-open file
+                score += TaperedScore{sign * 10, sign * 10}; // semi-open file
+        }
+
+        // Connected rooks: same rank or file, no pieces between (count each pair once)
+        Bitboard r1bb = allRooks;
+        while (r1bb) {
+            Square r1 = popLSB(r1bb);
+            Bitboard r2bb = r1bb; // only rooks with higher square index → each pair once
+            while (r2bb) {
+                Square r2 = popLSB(r2bb);
+                if ((rankOf(r1) == rankOf(r2) || fileOf(r1) == fileOf(r2)) &&
+                    !(BB::Between[r1][r2] & occ)) {
+                    score += TaperedScore{sign * 15, sign * 15};
+                }
+            }
         }
     }
     return score;
@@ -256,39 +294,107 @@ static TaperedScore evalBishopPair(const Position& pos) {
 }
 
 // ============================================================
-// King safety (simplified)
+// King safety — quadratic attacker penalty + pawn shield + endgame activity
 // ============================================================
+
+// Penalty indexed by number of distinct enemy pieces attacking king zone (capped at 5)
+static const int KingDangerPenalty[6] = { 0, 10, 30, 70, 130, 200 };
 
 static TaperedScore evalKingSafety(const Position& pos) {
     TaperedScore score;
+    Bitboard occ = pos.pieces();
+    bool isEndgame = pos.nonPawnMaterial() < 2000;
+
     for (Color c : {WHITE, BLACK}) {
         int sign = (c == WHITE) ? 1 : -1;
         Square ksq = pos.kingSquare(c);
         File kf = fileOf(ksq);
-
-        // Pawn shield — count friendly pawns near king
-        Bitboard shield = 0;
-        for (int df = -1; df <= 1; df++) {
-            int nf = kf + df;
-            if (nf < 0 || nf > 7) continue;
-            shield |= FileBB[nf];
-        }
-        // Only pawns 1-2 ranks in front of king
         Rank kr = rankOf(ksq);
-        if (c == WHITE) {
-            shield &= (RankBB[std::min(7, kr+1)] | RankBB[std::min(7, kr+2)]);
-        } else {
-            shield &= (RankBB[std::max(0, kr-1)] | RankBB[std::max(0, kr-2)]);
-        }
-        int shield_count = popcount(pos.pieces(c, PAWN) & shield);
-        score += TaperedScore{sign * (shield_count * 13 - 40), 0};
 
-        // Open file near king penalty (only in midgame)
-        for (int df = -1; df <= 1; df++) {
-            int nf = kf + df;
-            if (nf < 0 || nf > 7) continue;
-            bool open = !(pos.pieces(c, PAWN) & FileBB[nf]);
-            if (open) score += TaperedScore{sign * -10, 0};
+        if (!isEndgame) {
+            // Count distinct enemy pieces (excluding pawns) attacking king zone
+            Bitboard kingZone = BB::KingAttacks[ksq] | squareBB(ksq);
+            Bitboard attackingPieces = 0;
+            Bitboard zone = kingZone;
+            while (zone) {
+                Square sq = popLSB(zone);
+                attackingPieces |= (pos.attackersTo(sq, occ) & pos.pieces(~c)
+                                    & ~pos.pieces(~c, PAWN));
+            }
+            int numAttackers = std::min(popcount(attackingPieces), 5);
+            score += TaperedScore{sign * -KingDangerPenalty[numAttackers], 0};
+
+            // Pawn shield on kingside (king on f/g/h files)
+            if (kf >= FILE_F) {
+                Bitboard shieldRanks = (c == WHITE)
+                    ? (RankBB[std::min(7, kr+1)] | RankBB[std::min(7, kr+2)])
+                    : (RankBB[std::max(0, kr-1)] | RankBB[std::max(0, kr-2)]);
+                Bitboard shieldFiles = FileBB[FILE_F] | FileBB[FILE_G] | FileBB[FILE_H];
+                int shieldCount = popcount(pos.pieces(c, PAWN) & shieldRanks & shieldFiles);
+                score += TaperedScore{sign * shieldCount * 15, 0};
+            }
+
+            // Open file near king penalty
+            for (int df = -1; df <= 1; df++) {
+                int nf = kf + df;
+                if (nf < 0 || nf > 7) continue;
+                if (!(pos.pieces(c, PAWN) & FileBB[nf]))
+                    score += TaperedScore{sign * -10, 0};
+            }
+        } else {
+            // Endgame: reward king activity (centralization)
+            int dist = std::max(std::abs(kf - 3), std::abs((int)kr - 3));
+            int actBonus = std::max(0, (4 - dist) * 8);
+            score += TaperedScore{0, sign * actBonus};
+        }
+    }
+    return score;
+}
+
+// ============================================================
+// Threat detection — penalize hanging and poorly-defended pieces
+// Uses simple attacker/defender counts (consistent with SEE logic)
+// ============================================================
+
+static TaperedScore evalThreats(const Position& pos) {
+    TaperedScore score;
+    Bitboard occ = pos.pieces();
+
+    for (Color c : {WHITE, BLACK}) {
+        int sign = (c == WHITE) ? 1 : -1;
+        Color them = ~c;
+
+        for (int pt = PAWN; pt <= QUEEN; pt++) {
+            PieceType ptype = PieceType(pt);
+            int pieceVal = PieceValue[ptype];
+            Bitboard pcs = pos.pieces(c, ptype);
+
+            while (pcs) {
+                Square s = popLSB(pcs);
+                Bitboard enemyAttackers = pos.attackersTo(s, occ) & pos.pieces(them);
+                if (!enemyAttackers) continue;
+
+                // Find cheapest enemy attacker value
+                int cheapestVal = 0;
+                for (int ept = PAWN; ept <= KING; ept++) {
+                    if (enemyAttackers & pos.pieces(them, PieceType(ept))) {
+                        cheapestVal = PieceValue[ept];
+                        break;
+                    }
+                }
+
+                Bitboard defenders = pos.attackersTo(s, occ) & pos.pieces(c);
+
+                if (!defenders && cheapestVal < pieceVal) {
+                    // Hanging: attacked by lower-value piece, no defence
+                    score += TaperedScore{sign * -(pieceVal * 80 / 100),
+                                          sign * -(pieceVal * 80 / 100)};
+                } else if (defenders && cheapestVal < pieceVal) {
+                    // Defended but losing exchange (attacker worth less)
+                    score += TaperedScore{sign * -(pieceVal * 20 / 100),
+                                          sign * -(pieceVal * 20 / 100)};
+                }
+            }
         }
     }
     return score;
@@ -309,23 +415,7 @@ int evaluate(const Position& pos) {
 
     TaperedScore score;
 
-    // Material + PST for all pieces
-    for (Color c : {WHITE, BLACK}) {
-        for (int pt = PAWN; pt <= KING; pt++) {
-            PieceType ptype = PieceType(pt);
-            Bitboard bb = pos.pieces(c, ptype);
-            while (bb) {
-                Square s = popLSB(bb);
-                score += MaterialValue[ptype];
-                if (c == BLACK) score += TaperedScore{-MaterialValue[ptype].mg * 2,
-                                                       -MaterialValue[ptype].eg * 2};
-                score += pst(c, ptype, s);
-            }
-        }
-    }
-
-    // Recompute material cleanly
-    score = TaperedScore{};
+    // Material + PST
     for (Color c : {WHITE, BLACK}) {
         int sign = (c == WHITE) ? 1 : -1;
         for (int pt = PAWN; pt <= QUEEN; pt++) {
@@ -349,9 +439,11 @@ int evaluate(const Position& pos) {
     // Structural terms
     score += evalPawns(pos);
     score += evalMobility(pos);
+    score += evalPieceCoordination(pos);
     score += evalRooks(pos);
     score += evalBishopPair(pos);
     score += evalKingSafety(pos);
+    score += evalThreats(pos);
 
     // Taper
     int mg_weight = phase;
@@ -373,8 +465,12 @@ int evaluateDetailed(const Position& pos, EvalInfo& info) {
         phase += PhaseWeights[pt] * pos.count(PieceType(pt));
     info.phase = std::min(phase, MAX_PHASE);
 
+    Bitboard occ = pos.pieces();
+    bool isEndgame = pos.nonPawnMaterial() < 2000;
+
     for (int ci = 0; ci < 2; ci++) {
         Color c = Color(ci);
+        Color them = ~c;
 
         // Material
         info.material[ci] = {};
@@ -401,7 +497,6 @@ int evaluateDetailed(const Position& pos, EvalInfo& info) {
         // Pawns
         info.pawns[ci] = {};
         {
-            Color them = ~c;
             Bitboard pawns      = pos.pieces(c, PAWN);
             Bitboard theirPawns = pos.pieces(them, PAWN);
             Bitboard pp = pawns;
@@ -417,9 +512,14 @@ int evaluateDetailed(const Position& pos, EvalInfo& info) {
                 bool passed = !(theirPawns & ahead);
                 if (passed) {
                     int rank = (c == WHITE) ? r : 7 - r;
-                    int bonus = rank * rank * 5;
+                    int bonus = PassedPawnBonus[rank];
                     info.pawns[ci].mg += bonus / 2;
                     info.pawns[ci].eg += bonus;
+                    if (isEndgame && bonus > 0) {
+                        Square ksq = pos.kingSquare(c);
+                        if (chebyshev(ksq, s) <= 1)
+                            info.pawns[ci].eg += 20;
+                    }
                 }
                 bool doubled = popcount(pawns & FileBB[f]) > 1;
                 if (doubled) { info.pawns[ci].mg += -11; info.pawns[ci].eg += -56; }
@@ -429,38 +529,37 @@ int evaluateDetailed(const Position& pos, EvalInfo& info) {
             }
         }
 
-        // Mobility
+        // Mobility (flat per-square bonuses)
         info.mobility[ci] = {};
         {
-            Bitboard occ = pos.pieces();
             Bitboard own = pos.pieces(c);
             Bitboard knights = pos.pieces(c, KNIGHT);
             while (knights) {
                 Square s = popLSB(knights);
                 int mob = popcount(BB::KnightAttacks[s] & ~own);
-                info.mobility[ci].mg += KnightMobBonus[mob].mg;
-                info.mobility[ci].eg += KnightMobBonus[mob].eg;
+                info.mobility[ci].mg += mob * 4;
+                info.mobility[ci].eg += mob * 4;
             }
             Bitboard bishops = pos.pieces(c, BISHOP);
             while (bishops) {
                 Square s = popLSB(bishops);
-                int mob = std::min(popcount(BB::bishopAttacks(s, occ) & ~own), 13);
-                info.mobility[ci].mg += BishopMobBonus[mob].mg;
-                info.mobility[ci].eg += BishopMobBonus[mob].eg;
+                int mob = popcount(BB::bishopAttacks(s, occ) & ~own);
+                info.mobility[ci].mg += mob * 3;
+                info.mobility[ci].eg += mob * 3;
             }
             Bitboard rooks = pos.pieces(c, ROOK);
             while (rooks) {
                 Square s = popLSB(rooks);
-                int mob = std::min(popcount(BB::rookAttacks(s, occ) & ~own), 14);
-                info.mobility[ci].mg += RookMobBonus[mob].mg;
-                info.mobility[ci].eg += RookMobBonus[mob].eg;
+                int mob = popcount(BB::rookAttacks(s, occ) & ~own);
+                info.mobility[ci].mg += mob * 2;
+                info.mobility[ci].eg += mob * 2;
             }
             Bitboard queens = pos.pieces(c, QUEEN);
             while (queens) {
                 Square s = popLSB(queens);
-                int mob = std::min(popcount(BB::queenAttacks(s, occ) & ~own), 27);
-                info.mobility[ci].mg += QueenMobBonus[mob].mg;
-                info.mobility[ci].eg += QueenMobBonus[mob].eg;
+                int mob = popcount(BB::queenAttacks(s, occ) & ~own);
+                info.mobility[ci].mg += mob;
+                info.mobility[ci].eg += mob;
             }
         }
 
@@ -468,13 +567,27 @@ int evaluateDetailed(const Position& pos, EvalInfo& info) {
         info.rooks[ci] = {};
         {
             Bitboard rooks = pos.pieces(c, ROOK);
+            Bitboard allRooks = rooks;
             while (rooks) {
                 Square s = popLSB(rooks);
                 File f = fileOf(s);
-                bool no_own_pawn   = !(pos.pieces(c, PAWN) & FileBB[f]);
-                bool no_their_pawn = !(pos.pieces(~c, PAWN) & FileBB[f]);
-                if (no_own_pawn && no_their_pawn) { info.rooks[ci].mg += 36; info.rooks[ci].eg += 16; }
-                else if (no_own_pawn)              { info.rooks[ci].mg += 20; info.rooks[ci].eg += 7; }
+                bool no_own   = !(pos.pieces(c, PAWN) & FileBB[f]);
+                bool no_their = !(pos.pieces(them, PAWN) & FileBB[f]);
+                if (no_own && no_their) { info.rooks[ci].mg += 20; info.rooks[ci].eg += 20; }
+                else if (no_own)        { info.rooks[ci].mg += 10; info.rooks[ci].eg += 10; }
+            }
+            Bitboard r1bb = allRooks;
+            while (r1bb) {
+                Square r1 = popLSB(r1bb);
+                Bitboard r2bb = r1bb;
+                while (r2bb) {
+                    Square r2 = popLSB(r2bb);
+                    if ((rankOf(r1) == rankOf(r2) || fileOf(r1) == fileOf(r2)) &&
+                        !(BB::Between[r1][r2] & occ)) {
+                        info.rooks[ci].mg += 15;
+                        info.rooks[ci].eg += 15;
+                    }
+                }
             }
         }
 
@@ -490,24 +603,83 @@ int evaluateDetailed(const Position& pos, EvalInfo& info) {
         {
             Square ksq = pos.kingSquare(c);
             File kf = fileOf(ksq);
-            Bitboard shield = 0;
-            for (int df = -1; df <= 1; df++) {
-                int nf = kf + df;
-                if (nf < 0 || nf > 7) continue;
-                shield |= FileBB[nf];
-            }
             Rank kr = rankOf(ksq);
-            if (c == WHITE)
-                shield &= (RankBB[std::min(7, kr+1)] | RankBB[std::min(7, kr+2)]);
-            else
-                shield &= (RankBB[std::max(0, kr-1)] | RankBB[std::max(0, kr-2)]);
-            int shield_count = popcount(pos.pieces(c, PAWN) & shield);
-            info.kingSafety[ci].mg += shield_count * 13 - 40;
-            for (int df = -1; df <= 1; df++) {
-                int nf = kf + df;
-                if (nf < 0 || nf > 7) continue;
-                if (!(pos.pieces(c, PAWN) & FileBB[nf]))
-                    info.kingSafety[ci].mg += -10;
+            if (!isEndgame) {
+                Bitboard kingZone = BB::KingAttacks[ksq] | squareBB(ksq);
+                Bitboard attackingPieces = 0;
+                Bitboard zone = kingZone;
+                while (zone) {
+                    Square sq = popLSB(zone);
+                    attackingPieces |= (pos.attackersTo(sq, occ) & pos.pieces(them)
+                                        & ~pos.pieces(them, PAWN));
+                }
+                int numAttackers = std::min(popcount(attackingPieces), 5);
+                info.kingSafety[ci].mg += -KingDangerPenalty[numAttackers];
+                if (kf >= FILE_F) {
+                    Bitboard shieldRanks = (c == WHITE)
+                        ? (RankBB[std::min(7, kr+1)] | RankBB[std::min(7, kr+2)])
+                        : (RankBB[std::max(0, kr-1)] | RankBB[std::max(0, kr-2)]);
+                    Bitboard shieldFiles = FileBB[FILE_F] | FileBB[FILE_G] | FileBB[FILE_H];
+                    int shieldCount = popcount(pos.pieces(c, PAWN) & shieldRanks & shieldFiles);
+                    info.kingSafety[ci].mg += shieldCount * 15;
+                }
+                for (int df = -1; df <= 1; df++) {
+                    int nf = kf + df;
+                    if (nf < 0 || nf > 7) continue;
+                    if (!(pos.pieces(c, PAWN) & FileBB[nf]))
+                        info.kingSafety[ci].mg += -10;
+                }
+            } else {
+                int dist = std::max(std::abs(kf - 3), std::abs((int)kr - 3));
+                info.kingSafety[ci].eg += std::max(0, (4 - dist) * 8);
+            }
+        }
+
+        // Piece coordination
+        info.coordination[ci] = {};
+        {
+            Bitboard backRank = (c == WHITE) ? RankBB[RANK_1] : RankBB[RANK_8];
+            int knightsBack = popcount(pos.pieces(c, KNIGHT) & backRank);
+            info.coordination[ci].mg += -20 * knightsBack;
+            info.coordination[ci].eg += -20 * knightsBack;
+
+            Bitboard bishops = pos.pieces(c, BISHOP);
+            while (bishops) {
+                Square s = popLSB(bishops);
+                Bitboard colorMask = (squareBB(s) & LightSquares) ? LightSquares : DarkSquares;
+                int blocked = popcount(pos.pieces(c, PAWN) & colorMask);
+                info.coordination[ci].mg += -15 * blocked;
+                info.coordination[ci].eg += -15 * blocked;
+            }
+        }
+
+        // Threats
+        info.threats[ci] = {};
+        {
+            for (int pt = PAWN; pt <= QUEEN; pt++) {
+                PieceType ptype = PieceType(pt);
+                int pieceVal = PieceValue[ptype];
+                Bitboard pcs = pos.pieces(c, ptype);
+                while (pcs) {
+                    Square s = popLSB(pcs);
+                    Bitboard enemyAttackers = pos.attackersTo(s, occ) & pos.pieces(them);
+                    if (!enemyAttackers) continue;
+                    int cheapestVal = 0;
+                    for (int ept = PAWN; ept <= KING; ept++) {
+                        if (enemyAttackers & pos.pieces(them, PieceType(ept))) {
+                            cheapestVal = PieceValue[ept];
+                            break;
+                        }
+                    }
+                    Bitboard defenders = pos.attackersTo(s, occ) & pos.pieces(c);
+                    if (!defenders && cheapestVal < pieceVal) {
+                        info.threats[ci].mg += -(pieceVal * 80 / 100);
+                        info.threats[ci].eg += -(pieceVal * 80 / 100);
+                    } else if (defenders && cheapestVal < pieceVal) {
+                        info.threats[ci].mg += -(pieceVal * 20 / 100);
+                        info.threats[ci].eg += -(pieceVal * 20 / 100);
+                    }
+                }
             }
         }
     }
@@ -518,10 +690,12 @@ int evaluateDetailed(const Position& pos, EvalInfo& info) {
         int sign = (ci == 0) ? 1 : -1;
         total.mg += sign * (info.material[ci].mg + info.psqt[ci].mg + info.pawns[ci].mg
                           + info.mobility[ci].mg + info.rooks[ci].mg
-                          + info.bishops[ci].mg + info.kingSafety[ci].mg);
+                          + info.bishops[ci].mg + info.kingSafety[ci].mg
+                          + info.coordination[ci].mg + info.threats[ci].mg);
         total.eg += sign * (info.material[ci].eg + info.psqt[ci].eg + info.pawns[ci].eg
                           + info.mobility[ci].eg + info.rooks[ci].eg
-                          + info.bishops[ci].eg + info.kingSafety[ci].eg);
+                          + info.bishops[ci].eg + info.kingSafety[ci].eg
+                          + info.coordination[ci].eg + info.threats[ci].eg);
     }
 
     int mg_weight = info.phase;

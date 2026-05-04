@@ -290,6 +290,14 @@ void loop() {
                 info.bishops[0].mg, info.bishops[0].eg,
                 info.bishops[1].mg, info.bishops[1].eg,
                 taper({info.bishops[0].mg - info.bishops[1].mg, info.bishops[0].eg - info.bishops[1].eg}));
+            std::printf("%-16s %6d %6d %6d %6d %6d\n", "Coordination",
+                info.coordination[0].mg, info.coordination[0].eg,
+                info.coordination[1].mg, info.coordination[1].eg,
+                taper({info.coordination[0].mg - info.coordination[1].mg, info.coordination[0].eg - info.coordination[1].eg}));
+            std::printf("%-16s %6d %6d %6d %6d %6d\n", "Threats",
+                info.threats[0].mg, info.threats[0].eg,
+                info.threats[1].mg, info.threats[1].eg,
+                taper({info.threats[0].mg - info.threats[1].mg, info.threats[0].eg - info.threats[1].eg}));
             std::printf("%-16s %6s %6s %6s %6s %6d\n", "Tempo", "", "", "", "", (pos.sideToMove() == WHITE) ? TEMPO : -TEMPO);
             std::printf("%-16s %6s %6s %6s %6s %6d\n", "TOTAL", "", "", "", "", score);
             std::cout << "(positive = good for white, result is from side-to-move perspective: " << score << " cp)\n";
