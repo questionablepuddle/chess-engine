@@ -87,7 +87,10 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
       await browser.waitForOurTurn(expectedMoveCount);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg === 'GAME_OVER') { log('Main', 'Game over while waiting'); break; }
+      if (msg === 'GAME_OVER') {
+        log('Main', 'Game over while waiting for our turn');
+        break;
+      }
       throw err;
     }
 
@@ -274,15 +277,7 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
   // -----------------------------------------------------------------------
   // Game ended — log result
   // -----------------------------------------------------------------------
-  const result = await browser.page.evaluate(() => {
-    const el = document.querySelector(
-      '[class*="game-over"] [class*="result"], ' +
-      '[class*="result-modal"] [class*="result"], ' +
-      '[class*="GameOver"] [class*="title"], ' +
-      '.game-over-modal-title',
-    );
-    return el?.textContent?.trim() ?? 'unknown';
-  });
+  const result = (await browser.getGameResultText()) || 'unknown';
   log('Main', `Game result: ${result}`);
 }
 

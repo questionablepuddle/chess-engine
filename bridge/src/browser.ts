@@ -83,6 +83,9 @@ export class ChessDotCom {
 
   ourColor: 'white' | 'black' = 'white';
 
+  // URL of the active game page — used to detect navigation-away as game-over signal.
+  private _gamePageUrl: string = '';
+
   // Full move history accumulated across DOM scroll events.
   // DOM only shows the last ~4 visible moves; this keeps the complete list.
   private allMoves: string[] = [];
@@ -192,6 +195,7 @@ export class ChessDotCom {
   async prepareForGame(): Promise<void> {
     this.allMoves = [];
     await this.waitForBoard();
+    this._gamePageUrl = this.page.url();
     await this.debugChessBoardProperties();
     await this.page.screenshot({ path: '/tmp/debug-game-start.png' });
     log('Browser', 'Game start screenshot: /tmp/debug-game-start.png');
@@ -496,22 +500,58 @@ export class ChessDotCom {
     return false;
   }
 
-  // Returns true if the game is over (any result).
+  // Returns true if the game is over (checkmate, stalemate, resignation, time, etc.)
+  // Checks DOM overlays, board modals, and URL navigation away from the game page.
   async isGameOver(): Promise<boolean> {
-    for (const sel of SEL.gameOver) {
+    const selectors = [
+      '.game-over-modal',
+      '[class*="game-over"]',
+      '[class*="GameOver"]',
+      '[class*="result"]',
+      '.board-modal-container',
+      '[class*="result-modal"]',
+      '.result-wrap',
+    ];
+    for (const sel of selectors) {
       try {
-        const el = this.page.locator(sel).first();
-        if (await el.isVisible({ timeout: 200 })) return true;
+        if (await this.page.locator(sel).first().isVisible({ timeout: 200 })) return true;
       } catch {}
     }
+
+    // URL change: if we started on a /game/ URL and are no longer there, game ended
+    if (this._gamePageUrl.includes('/game/')) {
+      const currentUrl = this.page.url();
+      if (!currentUrl.includes('/game/')) {
+        log('Browser', `URL changed away from game page: ${currentUrl}`);
+        return true;
+      }
+    }
+
     return false;
+  }
+
+  // Read the visible game-over result text, if any.
+  async getGameResultText(): Promise<string> {
+    try {
+      return await this.page.evaluate(() => {
+        const el = document.querySelector(
+          '[class*="game-over"] [class*="result"], ' +
+          '[class*="result-modal"] [class*="result"], ' +
+          '[class*="GameOver"] [class*="title"], ' +
+          '.game-over-modal-title',
+        );
+        return el?.textContent?.trim() ?? '';
+      });
+    } catch {
+      return '';
+    }
   }
 
   // Wait until it's our turn (move list length reaches expectedCount).
   // Throws 'GAME_OVER' if the game ends while waiting.
   async waitForOurTurn(expectedMoveCount: number, timeoutMs = 120_000): Promise<number> {
     const deadline = Date.now() + timeoutMs;
-    const STUCK_MS = 30_000;
+    const STUCK_MS = 15_000;
     let lastSeenCount = -1;
     let lastChangeAt = Date.now();
 
@@ -526,11 +566,25 @@ export class ChessDotCom {
         lastChangeAt = Date.now();
       }
 
-      if (moves.length >= expectedMoveCount) return moves.length;
+      if (moves.length >= expectedMoveCount) {
+        // Check game over immediately after detecting a new opponent move — the
+        // final move (checkmate, etc.) may trigger the result modal right away.
+        if (await this.isGameOver()) throw new Error('GAME_OVER');
+        return moves.length;
+      }
 
       if (Date.now() - lastChangeAt > STUCK_MS) {
+        // Before treating as a genuine hang, confirm the game hasn't ended
+        // (game-over modal, URL change, or board overlay).
+        if (await this.isGameOver()) {
+          const result = await this.getGameResultText();
+          if (result) log('Browser', `Game over (${result}) — exiting cleanly`);
+          else         log('Browser', 'Game over detected — exiting cleanly');
+          throw new Error('GAME_OVER');
+        }
+        // Genuine stuck state: take diagnostic screenshot and abort.
         await this.page.screenshot({ path: '/tmp/debug-stuck.png' });
-        throw new Error(`Move list stuck at ${moves.length} for 30s — screenshot at /tmp/debug-stuck.png`);
+        throw new Error(`Move list stuck at ${moves.length} for 15s — screenshot at /tmp/debug-stuck.png`);
       }
 
       await sleep(500);
