@@ -161,6 +161,14 @@ async function playGame(engine: UCIEngine, browser: ChessDotCom): Promise<void> 
       }
     }
 
+    // Check for game over immediately after syncing the opponent's move.
+    // Checkmate/stalemate trigger the result modal right after the last move.
+    if (await browser.isGameOver()) {
+      const result = (await browser.getGameResultText()) || 'unknown';
+      log('Main', `Game over after opponent move — result: ${result}`);
+      break;
+    }
+
     // -----------------------------------------------------------------------
     // Ask engine for best move, then execute — retrying with fresh engine
     // evaluations until a move registers or all legal moves are exhausted.
